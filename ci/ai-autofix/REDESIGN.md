@@ -1,9 +1,18 @@
 # CI auto-fix — redesign working document
 
-Living document for reviewing the existing CI auto-fix implementation phase by
-phase, recording what we find, and planning the next implementation. We work in
-this repo; `README.md` describes the system **as built**, this file describes
-what we intend to change and why.
+Living document for reviewing the existing implementation phase by phase and
+planning the next one. We work in this repo; `README.md` describes the system
+**as built**, this file describes what we intend to change and why.
+
+## Scope
+
+**2026-09-28 — pivot: E2E only.** Autofix for Check Format and Lint is being
+dropped. The remaining system does one thing: when an E2E test fails, decide
+whether it is flaky and, if so, quarantine it.
+
+This is a larger change than it sounds, because Format/Lint was roughly half
+the codebase and *all* of the safety story. See "What the pivot changes" below
+before planning any work.
 
 ## How to use this document
 
@@ -31,29 +40,139 @@ Two rules that came out of the Phase B review and are worth keeping:
    depends on the real monorepo gets written down as an open question rather
    than assumed.
 
-## Phase map
+## Phase map (post-pivot)
 
 The system is a chain. Each link is gated on the previous one producing an
 artifact, so any link that fails quietly disables everything downstream.
 
-| Phase | Name                | Trigger                        | Produces                              |
-| ----- | ------------------- | ------------------------------ | ------------------------------------- |
-| 0     | Capture             | every instrumented stage       | `ci-output.txt`, `FAILED_STAGE`       |
-| A     | Deterministic fix   | Check Format / Lint failure    | `autofix.patch`, `autofix.env`        |
-| B     | E2E identity parse  | E2E Tests failure              | `e2e-failure.env`                     |
-| C     | E2E isolation       | `e2e-failure.env` exists       | `e2e-isolation.env`                   |
-| D     | Quarantine patch    | isolation verdict is `pass`    | `e2e-quarantine.patch` + `.env`       |
-| E     | Publish             | artifacts + `ENABLE_AI_AUTOFIX` | PR comment, or commit on feature branch |
+| Phase | Name                | Trigger                         | Produces                                |
+| ----- | ------------------- | ------------------------------- | --------------------------------------- |
+| 0     | Capture             | E2E Tests stage                 | `ci-output.txt`, `FAILED_STAGE`         |
+| ~~A~~ | ~~Format/Lint fix~~ | —                               | **retired by the pivot**                |
+| B     | E2E identity        | E2E Tests failure               | `e2e-failure.env`                       |
+| C     | E2E isolation       | `e2e-failure.env` exists        | `e2e-isolation.env`                     |
+| D     | Quarantine patch    | isolation verdict is `pass`     | `e2e-quarantine.patch` + `.env`         |
+| E     | Publish             | artifacts + feature flag on     | PR comment, or commit on feature branch |
 
-Plus three cross-cutting concerns that are not phases but constrain all of
-them: the credential boundary, the mechanical gates, and the local test
-harness. And one parked component: the Tier 1 Cursor agent.
+Letters B–E are kept rather than renumbered, so the document, `README.md` and
+the commit history stay legible against each other.
+
+---
+
+## What the pivot changes
+
+### The safety story has to be rebuilt
+
+This is the most important consequence and it is easy to miss. Format/Lint was
+the only part of the system that could **prove** its output correct: apply the
+patch to a pristine tree, re-run the real stage check, and accept only a
+genuine green. `verify_cmd` was that proof.
+
+Quarantine can never do this. A test passing in isolation is *evidence* that it
+is flaky, not proof — the same observation is equally consistent with an
+order-dependent test, a resource-contention failure, or a genuine bug that
+happens not to reproduce alone. Once Format/Lint is gone, **every output of
+this system is a judgement call.**
+
+So the quality bar moves. It is no longer "was it verified" but "is the
+evidence strong enough, and does the human reading the PR understand exactly
+what we did and did not establish." Three questions that were peripheral
+become central:
+
+- `ATTEMPTS=1` in Phase C. One green re-run is thin evidence, and it is now
+  the *only* evidence behind the only thing the system does.
+- Nothing ever removes `@flaky`. When quarantine was one feature among
+  several, one-way decay was a wart; now it is the system's main long-term
+  risk.
+- A genuinely order-dependent test passes in isolation and gets quarantined as
+  flaky. That misclassification is now the primary correctness risk.
+
+### Removal inventory
+
+Deleted outright:
+
+| File                     | Why                                         |
+| ------------------------ | ------------------------------------------- |
+| `run.sh`                 | Format/Lint phase 1                         |
+| `publish.sh`             | Format/Lint phase 2 router                  |
+| `open-bitbucket-pr.sh`   | Format/Lint apply (sibling PR)              |
+| `agent-fix.sh`           | Tier 1 agent — no host phase remains        |
+| `PROMPT.md`              | same                                        |
+| `cursor-cli-config.json` | same                                        |
+
+Kept: `parse-e2e-failure.sh`, `isolate-e2e-failure.sh`, `tag-e2e-flaky.sh`,
+`tag-e2e-flaky.mjs`, `push-e2e-quarantine.sh`, and `comment-bitbucket-pr.sh` —
+the last one is shared, since Phase E `plan` mode calls it directly from the
+`Jenkinsfile` rather than through `publish.sh`. Its Format/Lint branch can be
+collapsed to the e2e-flake wording.
+
+`lib.sh` loses more than half its body. Confirmed by usage search: outside
+`validate-gates.sh`, every one of the following is referenced only by `run.sh`
+or `open-bitbucket-pr.sh`.
+
+- `ELIGIBLE_STAGES`, `is_eligible_stage`
+- `verify_cmd`, `deterministic_fix`, `has_deterministic_fix`
+- `DENY_GLOBS`, `is_denied_path`, `gate_patch`
+- `tree_is_clean`, `restore_tree`
+- `autofix_branch_prefix`, `is_bot_change`
+
+Survivors: `log` / `die`, `patch_paths` (used internally by the quarantine
+gate), `gate_e2e_quarantine_patch`, `is_e2e_flake_head`.
+
+Worth noting that `DENY_GLOBS` does not merely become unused — it becomes
+*inverted*. It exists to stop a Format/Lint fix touching `*.cy.ts` and
+`*/e2e/*`. The only patch the system still produces is a deliberate `.cy.ts`
+edit, policed by `gate_e2e_quarantine_patch` instead.
+
+### The loop guard simplifies itself
+
+Action A7 from the old Phase A review resolves for free. With one publish path
+there is only one trailer: `Cursor-Autofix: e2e-flake` and
+`is_e2e_flake_head`. The `Cursor-Autofix: true` trailer, `is_bot_change`, and
+the `cursor/ci-autofix-*` branch convention all disappear along with the
+sibling-PR model that needed them.
+
+### The Jenkinsfile shrinks
+
+The whole Format/Lint tail of `post { failure { ... } }` goes: the eligibility
+list, the `DOCKER_IMAGE` guard for that path, `AI_AUTOFIX_ARTIFACT_DIR` and its
+cleanup, and both credentialed `docker.image(...).inside` blocks. `runCaptured`
+is left instrumenting one stage, which folds into the Phase 0 work below.
+
+### The credential scope narrows
+
+`BITBUCKET_AUTOFIX_TOKEN` no longer needs create-PR. Comment plus branch push
+is sufficient, which is a real least-privilege improvement worth taking while
+we are here.
+
+### Naming is now actively misleading
+
+There is no AI anywhere on the live path and, post-pivot, no "autofix" either —
+the system quarantines flaky tests. `ENABLE_AI_AUTOFIX`, `AI_AUTOFIX_MODE`, the
+`ci/ai-autofix/` directory and the `Cursor-Autofix` trailer all describe
+something the system no longer is. Renaming is cheap for the parameters,
+moderate for the directory (touches the `Jenkinsfile` and every `source` path),
+and not worth it for the trailer, which already exists in commit history.
+
+### Carried over from the retired Phase A action list
+
+Three items were not really about Format/Lint and still apply:
+
+- **A9 — always leave a trace.** A no-op today is an `echo` into the Jenkins
+  console that nobody reads. Now scoped to Phase E.
+- **A10 — capture cleanup.** See Phase 0.
+- **A11 — happy-path test.** Now means an end-to-end
+  parse → isolate → tag → gate fixture run.
+
+The rest (A1, A2, A4, A5, A6, A8) retire with Format/Lint. A3 — build patches
+from tracked changes only — is already satisfied on this path, since Phase D
+uses `git diff -- "$SPEC_PATH"` rather than `git add -A`.
 
 ---
 
 ## Phase 0 — Capture
 
-**Status:** Not yet reviewed
+**Status:** In review — Format/Lint scope closed by the pivot, E2E capture open
 **Code:** `pipeline-helpers.groovy` (`runCaptured`), `Jenkinsfile` stage blocks
 
 **Today:** Each instrumented stage runs inside the CI Docker image with stdout
@@ -62,48 +181,52 @@ and stderr tee'd to a temp file, then truncated into `ci-output.txt` with
 exit status is preserved through `PIPESTATUS[0]`, and the `catch` block records
 `FAILED_STAGE` before rethrowing.
 
-Worth noting up front, because it shaped the Phase B discussion: the capture is
-a **tail**, which is the correct choice for a Cypress log, since the end-of-run
-summary is exactly what the parser needs. Any redesign that starts reading from
-the top of the log inherits a truncation hazard that does not exist today.
+The capture is a **tail**, which is the correct choice for a Cypress log, since
+the end-of-run summary is exactly what the parser needs. Any redesign that
+starts reading from the top of the log inherits a truncation hazard that does
+not exist today.
 
-**Issues:** _to be filled during review._
+### Findings
 
-**Open questions to seed the review:**
+**The capture was only ever consumed by one stage.** `runCaptured` instruments
+five — Check Format, Lint, Unit Tests, E2E Tests, Build — and only E2E's text
+is read. On the Format/Lint path `run.sh:34` tested that `ci-output.txt`
+*existed* and never opened it, so up to 200 KiB was produced purely to satisfy
+a gate token. The pivot removes that consumer entirely, which makes the
+cleanup unambiguous: **capture on E2E Tests only.**
 
-- Is 200 KiB enough for a Lint failure across a wide `nx affected` set?
-- `ci-output.txt` is written into the repo root, which is why `tree_is_clean`
-  and `restore_tree` both carry explicit exclusions for it and the E2E
-  artifacts. Would a directory outside the repo remove a whole class of
-  special-casing?
-- Nothing records *which* stage produced `ci-output.txt` inside the file
-  itself; correlation is via `FAILED_STAGE` only.
+**The location costs more than the bytes.** Because the file is written to the
+repo root, exclusions exist in `_E2E_ARTIFACT_RE`, in `restore_tree`, in two
+`grep -vE` filters in `run.sh`, and in a `:(exclude)` pathspec. Deleting
+`run.sh` removes three of those; moving the capture outside the working tree
+removes the rest.
 
----
+**Two footguns in `runCaptured`:**
 
-## Phase A — Deterministic Format/Lint fix
+- The shell script is assembled by Groovy string concatenation
+  (`''' + command + '''`). A command containing a quote would behave
+  surprisingly; one containing `'''` would break the build. Latent, not active.
+- `tail -c` cuts on a byte boundary, so it can split a line and mangle UTF-8 at
+  the head of the file. Harmless for the E2E parser only because that parser
+  reads from the end — luck, not design. `tail -n` would be line-safe.
 
-**Status:** Not yet reviewed
-**Code:** `run.sh`, `lib.sh` (`deterministic_fix`, `verify_cmd`, `gate_patch`)
+Not a defect: `set -uo pipefail` without `-e` is deliberate and correct, since
+the real status is recovered from `PIPESTATUS[0]`.
 
-**Today:** On a Check Format or Lint failure, `run.sh` runs with no Bitbucket
-token and no Cursor key. It resets the tree to `HEAD` to drop Compile and
-postinstall noise, runs the matching deterministic fixer (`nx format:write` or
-`nx affected --target=lint --fix`), captures the result as a patch, runs it
-through the path gate, then proves it by applying to a pristine tree and
-re-running the real stage check. Only a genuine pass emits an artifact. Every
-gate fails open with exit 0 so the original build failure stays the signal.
+### Actions
 
-**Issues:** _to be filled during review._
+- **P0-1.** Instrument only the E2E Tests stage; plain `sh` elsewhere.
+- **P0-2.** Write the capture outside the working tree and delete the
+  exclusion lists that exist only to tolerate it in the repo root.
+- **P0-3.** Switch to a line-safe tail, or document why byte truncation is
+  acceptable.
+- **P0-4.** Reconsider whether `runCaptured` still earns being a helper once it
+  wraps a single stage.
 
-**Open questions to seed the review:**
+### Still open
 
-- `verify_cmd` re-runs the full stage check, which on a large `nx affected` set
-  may dominate the post-failure budget. Is the cost acceptable?
-- The fixer runs against the whole affected set, not just the files that
-  failed. Is a narrower invocation worth it?
-- Is "deterministic only" still the intended ceiling, or is the parked agent
-  tier expected to come back? (See the parked-component section.)
+- If Phase B moves to `after:spec` JSON, does the text capture stay as the
+  fallback, or does it go too? These decisions are coupled.
 
 ---
 
@@ -174,6 +297,9 @@ entirely positional and textual.** A Cypress or Nx reporter format change
 breaks it with no signal beyond "ambiguous" in a log nobody reads. That is
 precisely how the `mawk` bug stayed invisible.
 
+Post-pivot this matters more, not less: Phase B is now the front door to the
+only feature the system has.
+
 ### Options
 
 **1. JUnit XML** via the bundled `mocha-junit-reporter` (`reporter: 'junit'`).
@@ -211,7 +337,8 @@ cost of moving off log scraping, and it splits into three cases:
   — produce no test results, because Mocha never runs. But `after:spec` still
   fires with `results.error` populated, which is *strictly better* than today:
   an explicit "this is a build break, not a flake" signal instead of the parser
-  coincidentally giving up.
+  coincidentally giving up. Post-pivot this distinction is worth real money,
+  since quarantining a compile break would be actively harmful.
 
 ### Direction agreed
 
@@ -233,9 +360,9 @@ Not yet a commitment: no spike has been run against the real monorepo.
 - **Per-project config.** `setupNodeEvents` lives in each
   `apps/<proj>-e2e/cypress.config.ts`, so this is an edit per e2e project
   unless there is a shared Nx preset to hook instead.
-- **Artifact location.** The results directory has to land in the Jenkins
-  workspace root to be archived alongside the existing artifacts, and will need
-  adding to the exclusion lists in `tree_is_clean` / `restore_tree`.
+- **Artifact location.** The results directory has to land somewhere Jenkins
+  archives from — see Phase 0 action P0-2, which should decide the location for
+  both.
 - **Fallback selection.** Needs a clear rule for when to trust JSON over the
   parser, and the two must not be able to disagree silently.
 
@@ -246,6 +373,10 @@ retry. If retries are enabled on PR runs, **Cypress is already telling us a
 test is flaky** — which is exactly what Phase C's isolation re-run exists to
 discover. We may be able to skip that entire stage for tests that
 self-identify, which would remove the most expensive step in the chain.
+
+Post-pivot this is more attractive still: it is also *better evidence* than a
+single isolated re-run, because a retry that flips within the same run
+controls for environment differences that isolation does not.
 
 ### Open questions
 
@@ -260,7 +391,7 @@ self-identify, which would remove the most expensive step in the chain.
 
 ## Phase C — E2E isolation re-run
 
-**Status:** Not yet reviewed
+**Status:** Not yet reviewed — now the highest-value phase to review
 **Code:** `isolate-e2e-failure.sh`
 
 **Today:** Given `e2e-failure.env`, re-runs that single test via
@@ -271,20 +402,27 @@ something to read. Guards on the spec file existing, on `Tests: N` being at
 least 1 so a grep that matched nothing is not read as a pass, and on timeout
 exit codes 124 and 143. Kill switch `SKIP_E2E_ISOLATION`.
 
-**Issues:** _to be filled during review._
+**Why this is now the priority:** with Format/Lint gone, this stage *is* the
+evidence. Everything the system claims rests on the strength of what happens
+here.
 
 **Open questions to seed the review:**
 
-- `ATTEMPTS=1` is hardcoded. A single green re-run is thin evidence of flake;
-  is N-of-M worth the runtime?
+- `ATTEMPTS=1` is hardcoded. One green re-run is thin evidence for the only
+  decision the system makes. What is the right N-of-M, and what runtime is it
+  worth?
 - Title matching goes through a regex-escaped `--env.grep`, which is a
   substring match — two tests whose titles share a prefix could both run. The
   `Tests: N` check confirms *something* ran, not that the *right* thing ran.
+  This is now the primary correctness risk in the system.
+- A genuinely order-dependent test passes in isolation and gets quarantined as
+  flaky. Can we distinguish? Running the whole spec rather than one grep-ed
+  test would be one signal.
 - Unlike `tag-e2e-flaky.sh`, this script does not honor an `AUTOFIX_ROOT`
   override, which is why six tests in `validate-gates.sh` cannot pass outside
   the monorepo.
-- A test that is genuinely order-dependent passes in isolation and gets
-  quarantined as flaky. Is that acceptable?
+- Should the isolation verdict record *why* we believe a flake, in a form the
+  PR comment can quote?
 
 ---
 
@@ -307,12 +445,14 @@ not leave `it.only`. The working tree is restored either way. Kill switch
 This is the best-tested part of the system — all the tagger shape fixtures
 under `testdata/quarantine/` pass.
 
-**Issues:** _to be filled during review._
-
 **Open questions to seed the review:**
 
-- Nothing ever *removes* `@flaky`. Quarantine is one-way, so coverage decays
-  silently. Is there a companion process to un-quarantine?
+- **Nothing ever removes `@flaky`.** Quarantine is one-way, so coverage decays
+  silently. Post-pivot this is the system's main long-term risk: unchecked, the
+  only thing it does is progressively disable the test suite. A companion
+  un-quarantine process may be a requirement rather than a nice-to-have.
+- Is there a cap? Quarantining the tenth test in a spec should probably
+  escalate to a human rather than proceed.
 - Template-literal titles abort. How common are they in the real specs?
 - The tagger is bespoke parsing logic. Would a real TS AST (ts-morph,
   jscodeshift) be more robust, or is that overkill for a signature edit?
@@ -322,27 +462,25 @@ under `testdata/quarantine/` pass.
 ## Phase E — Publish
 
 **Status:** Not yet reviewed
-**Code:** `publish.sh`, `comment-bitbucket-pr.sh`, `open-bitbucket-pr.sh`,
-`push-e2e-quarantine.sh`
+**Code:** `push-e2e-quarantine.sh`, `comment-bitbucket-pr.sh`
 
-**Today:** The only code that sees `BITBUCKET_AUTOFIX_TOKEN`. Format/Lint in
-`plan` mode comments the verified diff; in `apply` mode it opens a PR into
-`CHANGE_BRANCH`, never main or master. E2E quarantine in `plan` mode comments;
-in `apply` mode it commits onto the `CHANGE_BRANCH` tip with a
-`Cursor-Autofix: e2e-flake` trailer — no force push, no sibling PR, staging
-only the gated paths. Nothing ever auto-merges.
-
-**Issues:** _to be filled during review._
+**Today (post-pivot):** `plan` mode comments the gated diff on the PR; `apply`
+mode commits it onto the `CHANGE_BRANCH` tip with a `Cursor-Autofix: e2e-flake`
+trailer — no force push, no sibling PR, staging only the gated paths, refusing
+main and master. Nothing ever auto-merges.
 
 **Open questions to seed the review:**
 
-- `apply` mode pushes directly to the contributor's feature branch. Is that
-  still the right default, or should everything land as a comment?
-- Bitbucket workspace and slug are hardcoded defaults in every script.
-- `comment-bitbucket-pr.sh` inlines the whole patch into a comment body with no
-  size cap.
-- The JSON body is built with `python3` or `jq`, whichever exists — two code
-  paths for one job.
+- The comment should now carry the *evidence*, not just the diff: what was
+  re-run, how many times, and explicitly what that does and does not prove.
+  This is the main mitigation for losing `verify_cmd`.
+- **A9 — always leave a trace.** Today a no-op is an `echo` nobody reads. When
+  the system does nothing, say so on the PR.
+- Bitbucket workspace and slug are hardcoded defaults.
+- `comment-bitbucket-pr.sh` inlines the whole patch with no size cap, and
+  builds JSON with `python3` or `jq`, whichever exists — two code paths for one
+  job, now worth collapsing since the file is being touched anyway.
+- Narrow the token to comment + push, dropping create-PR.
 
 ---
 
@@ -350,59 +488,55 @@ only the gated paths. Nothing ever auto-merges.
 
 **Status:** Not yet reviewed
 
-The central design idea, and the part most worth protecting in any rewrite:
-Phase 1 produces a verified patch with no credentials in the environment; Phase
-2 is the only thing holding a token, bound by Jenkins in a separate step. Worth
-reviewing whether the boundary is still airtight given Phase E now runs
-`push-e2e-quarantine.sh` on the Jenkins agent rather than inside the container.
+The original design kept patch production credential-free and confined the
+token to a separate publish step. Post-pivot, review whether the boundary still
+holds: Phase E runs `push-e2e-quarantine.sh` directly on the Jenkins agent
+rather than inside the container, and Phases B–D no longer sit behind the
+`run.sh` entry point that made the separation obvious.
 
 ## Cross-cutting: the mechanical gates
 
 **Status:** Not yet reviewed
 
-`gate_patch`, `gate_e2e_quarantine_patch`, `verify_cmd`, the `DENY_GLOBS` list,
-and the loop guards. The principle — enforce in code, not in prose to a model —
-should survive. Review targets: whether `DENY_GLOBS` is still complete, and
-whether `is_bot_change` treating an unknown ref as bot is too aggressive now
-that E2E quarantine pushes land on the feature branch.
+The principle — enforce in code, not in prose to a model — should survive.
+Post-pivot only `gate_e2e_quarantine_patch` remains, which makes it the single
+mechanical check in the entire system. Worth re-reading with that weight in
+mind: it is now load-bearing alone.
 
 ## Cross-cutting: the local test harness
 
 **Status:** Not yet reviewed
 **Code:** `validate-gates.sh`
 
-82 checks with no network access. 72 passing on `main`; 76 passing with PR #1
-applied, the remaining 6 being the Phase C isolation dry-run group, which
-cannot pass outside the monorepo because `isolate-e2e-failure.sh` has no
-`AUTOFIX_ROOT` override. Worth
-deciding whether the suite should be green standalone — a suite with permanent
-expected failures trains people to ignore it.
+82 checks today; 72 passing on `main`, 76 with PR #1 applied. The pivot deletes
+roughly half of them — stage eligibility, the path gate, `gate_patch`, the
+`run.sh` skip gates, the `open-bitbucket-pr.sh` guards, the `publish.sh` exec
+boundary, and the `is_bot_change` cases. The parse, isolate and quarantine
+sections all survive.
 
-## Parked: the Tier 1 Cursor agent
+Two things to decide while it is being cut down:
 
-**Status:** Not yet reviewed
-**Code:** `agent-fix.sh`, `PROMPT.md`, `cursor-cli-config.json`
-
-In the tree but unused; `validate-gates.sh` actively asserts that `run.sh` does
-not reference it. Decide explicitly: revive, or delete. Dead code that the test
-suite pins in place is the worst of both.
+- The six permanently-failing isolation dry-run checks, which cannot pass
+  outside the monorepo because `isolate-e2e-failure.sh` has no `AUTOFIX_ROOT`
+  override. A suite with expected failures trains people to ignore it.
+- **A11** — there is still no end-to-end fixture run of
+  parse → isolate → tag → gate.
 
 ---
 
 ## Known loose ends
-
-Small, already-identified, not yet scheduled:
 
 - `testdata/e2e-failure.env.sample` still carries the pre-de-branding path
   `src/e2e/alarm-central/local/alarms.cy.ts`; the branding pass missed it. It
   is self-consistent with the dry-run assertions today, so changing it means
   updating both.
 - The `ENABLE_AI_AUTOFIX` parameter description in the `Jenkinsfile` says "On
-  format/lint/unit/build failure", but `ELIGIBLE_STAGES` and the `Jenkinsfile`'s
-  own eligibility list are both limited to Check Format and Lint. Stale
-  relative to the Phase A scope decision.
+  format/lint/unit/build failure" — wrong before the pivot, and now wrong in a
+  second way. Fold into the renaming discussion above.
 - The `Jenkinsfile` loads `ci/pipeline-helpers.groovy`, but in this repo the
   file sits at the root. Confirm the real location in the monorepo.
+- `README.md` documents Phases A–E as built and will need rewriting once the
+  pivot lands.
 
 ## Decision log
 
@@ -410,3 +544,6 @@ Small, already-identified, not yet scheduled:
 | ---------- | ----- | ------------------------------------------------------------------------ |
 | 2026-09-28 | B     | Fix POSIX portability + fixture drift as an immediate patch (PR #1).      |
 | 2026-09-28 | B     | Direction: `after:spec` structured JSON, log parser retained as fallback. Not yet committed — needs a spike against the real monorepo. |
+| 2026-09-28 | 0     | Finding: the Format/Lint capture is never read — `run.sh` only tests that the file exists. Direction: drop the capture where unconsumed, delete the gate, relocate the E2E capture outside the repo root. |
+| 2026-09-28 | A     | Action list A1–A11 recorded, then superseded by the pivot. A9, A10, A11 carried over; the rest retired. |
+| 2026-09-28 | all   | **Pivot: drop Format/Lint autofix, E2E only.** Retires Phase A, deletes six files, halves `lib.sh` and the test suite, and removes the system's only mechanism for proving its own output correct. Review priority moves to Phase C. |
