@@ -225,13 +225,13 @@ PARSE="${SCRIPT_DIR}/parse-e2e-failure.sh"
 TD="${SCRIPT_DIR}/testdata"
 ENV_OUT="$(mktemp)"
 rm -f "$ENV_OUT"
-assert_exit "parse happy path (acme-app)" 0 \
-  "$PARSE" "${TD}/e2e-fail-acme-app.txt" "$ENV_OUT"
+assert_exit "parse happy path (acme-product)" 0 \
+  "$PARSE" "${TD}/e2e-fail-acme-product.txt" "$ENV_OUT"
 T="happy path env keys"
 # shellcheck disable=SC1090
 if [[ -f "$ENV_OUT" ]] && set -a && source "$ENV_OUT" && set +a \
   && [[ "$E2E_PROJECT" == "acme-app-e2e" ]] \
-  && [[ "$E2E_SPEC" == "src/e2e/alarm-central/local/alarms.cy.ts" ]] \
+  && [[ "$E2E_SPEC" == "src/e2e/module-a/local/products.cy.ts" ]] \
   && [[ "$E2E_TITLE" == "should show chevron link properly." ]]; then
   ok "$T"
 else
