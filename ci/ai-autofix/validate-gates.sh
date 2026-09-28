@@ -231,7 +231,7 @@ T="happy path env keys"
 # shellcheck disable=SC1090
 if [[ -f "$ENV_OUT" ]] && set -a && source "$ENV_OUT" && set +a \
   && [[ "$E2E_PROJECT" == "acme-app-e2e" ]] \
-  && [[ "$E2E_SPEC" == "src/e2e/alarm-central/local/alarms.cy.ts" ]] \
+  && [[ "$E2E_SPEC" == "src/e2e/module-a/local/products.cy.ts" ]] \
   && [[ "$E2E_TITLE" == "should show chevron link properly." ]]; then
   ok "$T"
 else
@@ -322,7 +322,7 @@ else
   bad "$T"; cat "$ISO_OUT" 2>/dev/null || true
 fi
 T="dry-run argv has --spec"
-if grep -q -- '--spec=src/e2e/alarm-central/local/alarms.cy.ts' "$DRY_LOG"; then ok "$T"; else bad "$T"; cat "$DRY_LOG"; fi
+if grep -q -- '--spec=src/e2e/module-a/local/products.cy.ts' "$DRY_LOG"; then ok "$T"; else bad "$T"; cat "$DRY_LOG"; fi
 T="dry-run argv has escaped grep (dot/parens)"
 # argv is printf '%q'-quoted; escaped pattern appears as dots\\.\\\(
 if grep -Fq 'dots\\.\\\(and' "$DRY_LOG"; then ok "$T"; else bad "$T"; cat "$DRY_LOG"; fi
