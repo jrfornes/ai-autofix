@@ -1,0 +1,19 @@
+# Ambiguous: Mocha mid-stream error only — no end-summary "N failing" / no leaf title.
+
+> nx run acme-app-e2e:e2e --browser=chromium
+
+  Running:  src/e2e/search.cy.ts                                              (1 of 1)
+
+Oops...we found an error preparing this test file:
+
+  > Error: Webpack Compilation Error
+    Module not found: Error: Can't resolve './missing'
+
+We attempted to make a best-effort guess at the mid-stream AssertionError: expected true to equal false
+but there is no Cypress failing summary at EOF.
+
+ NX   Running target e2e for 1 project failed
+
+Failed tasks:
+
+- acme-app-e2e:e2e

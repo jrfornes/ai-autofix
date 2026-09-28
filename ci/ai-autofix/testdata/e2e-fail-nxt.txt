@@ -1,0 +1,52 @@
+# Sanitized Nx+Cypress CI shape (--output-style=static). Happy path.
+
+> nx run acme-app-e2e:e2e --browser=chromium --env.grepTags=-@flaky
+
+  Running:  src/e2e/alarm-central/local/alarms.cy.ts                          (1 of 2)
+
+
+  Alarm Central - Local Alarms
+    ✓ lists alarms in the table (1234ms)
+    1) should show chevron link properly.
+
+
+  1 passing (2s)
+  1 failing
+
+  1) Alarm Central - Local Alarms
+       should show chevron link properly.:
+     AssertionError: Timed out retrying after 15000ms: Expected to find element: `[data-cy=chevron-link]`, but never found it.
+      at Context.eval (webpack://acme-app-e2e/./src/e2e/alarm-central/local/alarms.cy.ts:42:0)
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  (Results)
+
+  ┌────────────────────────────────────────────────────────────────────────────────────────────────┐
+  │ Tests:        2                                                                                │
+  │ Passing:      1                                                                                │
+  │ Failing:      1                                                                                │
+  │ Pending:      0                                                                                │
+  │ Skipped:      0                                                                                │
+  │ Screenshots:  0                                                                                │
+  │ Video:        false                                                                            │
+  │ Duration:     3 seconds                                                                        │
+  │ Spec Ran:     src/e2e/alarm-central/local/alarms.cy.ts                                         │
+  └────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+                                                                                                    
+  1 failing
+
+  1) Alarm Central - Local Alarms
+       should show chevron link properly.:
+     AssertionError: Timed out retrying after 15000ms: Expected to find element: `[data-cy=chevron-link]`, but never found it.
+
+
+ NX   Running target e2e for 1 project failed
+
+Failed tasks:
+
+- acme-app-e2e:e2e

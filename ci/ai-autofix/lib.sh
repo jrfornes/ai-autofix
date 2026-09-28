@@ -1,0 +1,237 @@
+#!/usr/bin/env bash
+# Shared helpers for the CI auto-fix agent.
+# Sourced by run.sh, agent-fix.sh, publish.sh and the *-bitbucket-pr.sh scripts.
+# Sourcing has no side effects beyond defining functions and config arrays.
+
+# ---------------------------------------------------------------------------
+# logging
+# ---------------------------------------------------------------------------
+log() { echo "[ai-autofix] $*" >&2; }
+die() { log "FATAL: $*"; exit 1; }
+
+# ---------------------------------------------------------------------------
+# stage configuration
+# ---------------------------------------------------------------------------
+# Only these Jenkins stages are eligible for autofix (Phase A: format/lint only).
+ELIGIBLE_STAGES=("Check Format" "Lint")
+
+is_eligible_stage() {
+  local want="$1" s
+  for s in "${ELIGIBLE_STAGES[@]}"; do [[ "$s" == "$want" ]] && return 0; done
+  return 1
+}
+
+# Reproduce a stage's check. Exits non-zero when broken, zero when fixed.
+# Requires CHANGE_TARGET. This is the authoritative gate, run by CI on a clean
+# tree — never trust a fixer claim that it fixed anything.
+verify_cmd() {
+  case "$1" in
+    "Check Format") npx nx format:check --base "origin/${CHANGE_TARGET}" --head HEAD ;;
+    "Lint")         npx nx affected --target=lint --base "origin/${CHANGE_TARGET}" ;;
+    *)              return 2 ;;
+  esac
+}
+
+# A pure, deterministic autofixer for a stage (no LLM, no injection surface),
+# or non-zero if the stage has no safe deterministic fix.
+deterministic_fix() {
+  case "$1" in
+    "Check Format") npx nx format:write --base "origin/${CHANGE_TARGET}" ;;
+    "Lint")         npx nx affected --target=lint --fix --base "origin/${CHANGE_TARGET}" ;;
+    *)              return 3 ;;
+  esac
+}
+
+has_deterministic_fix() {
+  case "$1" in "Check Format"|"Lint") return 0 ;; *) return 1 ;; esac
+}
+
+# ---------------------------------------------------------------------------
+# loop prevention
+# ---------------------------------------------------------------------------
+autofix_branch_prefix="cursor/ci-autofix-"
+
+# True if this change was itself produced by a prior Format/Lint autofix.
+# Derives the branch from CI env ONLY. `git rev-parse HEAD` returns the literal
+# string "HEAD" on the detached checkouts Jenkins uses for PR builds, so it is
+# useless as a branch signal. Unknown ref => treat as bot (fail safe).
+# Does NOT treat Cursor-Autofix: e2e-flake (or [cursor-autofix] in subject alone)
+# as bot — quarantine pushes land on the feature branch and must not disable
+# Format/Lint autofix on the next build.
+is_bot_change() {
+  local branch="${CHANGE_BRANCH:-${BRANCH_NAME:-}}"
+  if [[ -z "$branch" ]]; then
+    log "loop-guard: no CHANGE_BRANCH/BRANCH_NAME; treating as bot"
+    return 0
+  fi
+  [[ "$branch" == ${autofix_branch_prefix}* ]] && return 0
+  git log -1 --pretty=%B 2>/dev/null | grep -qx 'Cursor-Autofix: true' && return 0
+  return 1
+}
+
+# True if HEAD was produced by Phase E e2e quarantine push.
+is_e2e_flake_head() {
+  git log -1 --pretty=%B 2>/dev/null | grep -qx 'Cursor-Autofix: e2e-flake'
+}
+
+# ---------------------------------------------------------------------------
+# path gate  (mechanical enforcement of "minimal, in-scope" — not prose)
+# ---------------------------------------------------------------------------
+# Files the fix must never touch. In [[ $p == $glob ]], '*' crosses '/', so a
+# single '*' already spans directories. Weakening a check to make it pass
+# (editing lint/format/build config, deleting the failing test, churning the
+# lockfile) is exactly what this list blocks.
+DENY_GLOBS=(
+  'ci/*' 'Jenkinsfile' '*/Jenkinsfile'
+  '.cursor/*' '*/.cursor/*'
+  '*.spec.ts' '*.spec.tsx' '*.test.ts' '*.test.tsx'
+  '*.e2e.ts' '*.e2e.tsx' '*.cy.ts' '*.cy.tsx' '*/e2e/*'
+  '.eslintrc' '.eslintrc.*' '*/.eslintrc' '*/.eslintrc.*'
+  'eslint.config.*' '*/eslint.config.*'
+  '.prettierrc' '.prettierrc.*' '*/.prettierrc' '*/.prettierrc.*'
+  '.prettierignore' '*/.prettierignore'
+  'nx.json'
+  'tsconfig.json' 'tsconfig.*.json' '*/tsconfig.json' '*/tsconfig.*.json'
+  'package-lock.json' 'yarn.lock' 'pnpm-lock.yaml' '*/package-lock.json'
+)
+
+is_denied_path() {
+  local p="$1" g
+  for g in "${DENY_GLOBS[@]}"; do
+    # shellcheck disable=SC2053  # unquoted $g intentional: glob match
+    [[ "$p" == $g ]] && return 0
+  done
+  return 1
+}
+
+# Print every file a patch touches (both sides of each diff header), deduped.
+patch_paths() {
+  awk '
+    /^diff --git /{
+      a=$3; b=$4; sub(/^a\//,"",a); sub(/^b\//,"",b);
+      if (a != "") print a;
+      if (b != "") print b;
+    }' "$1" | sort -u
+}
+
+# Reject a patch that renames/copies files or touches any protected path.
+gate_patch() {
+  local patch="$1" bad=0 p
+  [[ -s "$patch" ]] || { log "gate: empty patch"; return 1; }
+  if grep -qE '^(rename|copy) (from|to) ' "$patch"; then
+    log "GATE FAIL: patch renames/copies files (not allowed for autofix)"
+    return 1
+  fi
+  while IFS= read -r p; do
+    [[ -z "$p" || "$p" == "/dev/null" ]] && continue
+    if is_denied_path "$p"; then
+      log "GATE FAIL: protected path in patch: $p"
+      bad=1
+    fi
+  done < <(patch_paths "$patch")
+  [[ "$bad" -eq 0 ]]
+}
+
+# Quarantine-only gate: exactly one expected *.cy.ts/*.cy.js path; signature-only
+# hunks that introduce @flaky (no body/assertion/import/.skip churn).
+gate_e2e_quarantine_patch() {
+  local patch="$1" expected="$2"
+  local paths path_count p line body has_flaky=0
+
+  [[ -s "$patch" ]] || { log "quarantine gate: empty patch"; return 1; }
+  [[ -n "$expected" ]] || { log "quarantine gate: missing expected path"; return 1; }
+
+  case "$expected" in
+    *.cy.ts|*.cy.js) ;;
+    *)
+      log "GATE FAIL: expected path is not *.cy.ts/*.cy.js: $expected"
+      return 1
+      ;;
+  esac
+
+  if grep -qE '^(rename|copy) (from|to) |^deleted file mode |^new file mode ' "$patch"; then
+    log "GATE FAIL: quarantine patch renames/copies/adds/deletes files"
+    return 1
+  fi
+
+  paths="$(patch_paths "$patch")"
+  path_count=0
+  while IFS= read -r p; do
+    [[ -z "$p" || "$p" == "/dev/null" ]] && continue
+    path_count=$((path_count + 1))
+    if [[ "$p" != "$expected" ]]; then
+      log "GATE FAIL: unexpected path in quarantine patch: $p (want $expected)"
+      return 1
+    fi
+  done <<<"$paths"
+
+  if [[ "$path_count" -ne 1 ]]; then
+    log "GATE FAIL: quarantine patch must touch exactly one file (got $path_count)"
+    return 1
+  fi
+
+  while IFS= read -r line; do
+    [[ "$line" == +++* || "$line" == ---* ]] && continue
+    [[ "$line" == +* || "$line" == -* ]] || continue
+    body="${line:1}"
+
+    if printf '%s' "$body" | grep -qE \
+      'import[[:space:]]|(^|[[:space:]])cy\.|\.should\(|(^|[[:space:]])expect\(|(^|[^[:alnum:]_])it\.skip([^[:alnum:]_]|$)|(^|[^[:alnum:]_])describe[[:space:]]*\(|(^|[^[:alnum:]_])beforeEach[[:space:]]*\(|(^|[^[:alnum:]_])afterEach[[:space:]]*\('; then
+      log "GATE FAIL: quarantine patch changes non-signature content: $body"
+      return 1
+    fi
+
+    if [[ "$line" == +* ]] && printf '%s' "$body" | grep -qE '(^|[^[:alnum:]_])it\.only([^[:alnum:]_]|$)'; then
+      log "GATE FAIL: quarantine patch must not leave it.only"
+      return 1
+    fi
+
+    if ! printf '%s' "$body" | grep -qE \
+      '(^|[^[:alnum:]_])it(\.only)?[[:space:]]*\(|tags:|@flaky'; then
+      log "GATE FAIL: changed line is not an it() signature/tags edit: $body"
+      return 1
+    fi
+
+    if [[ "$line" == +* ]] && printf '%s' "$body" | grep -qF '@flaky'; then
+      has_flaky=1
+    fi
+  done < <(grep -E '^[+-]' "$patch" || true)
+
+  if [[ "$has_flaky" -ne 1 ]]; then
+    log "GATE FAIL: quarantine patch does not introduce @flaky"
+    return 1
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# working-tree hygiene
+# ---------------------------------------------------------------------------
+# "Clean" ignores ci-output.txt: Jenkins writes it into the repo root as an
+# untracked file on every run, so it must not count as a dirty tree.
+# Workspace-root E2E capture/isolation/quarantine artifacts (and ci-output.txt)
+# must survive restore/clean — Jenkins archives them after the failure post.
+_E2E_ARTIFACT_RE='[[:space:]](ci-output\.txt|e2e-failure\.env|e2e-isolation\.env|e2e-quarantine\.(patch|env))$'
+
+tree_is_clean() {
+  local dirty
+  dirty="$(git status --porcelain 2>/dev/null | grep -vE "$_E2E_ARTIFACT_RE" || true)"
+  [[ -z "$dirty" ]]
+}
+
+# Restore the tree to a known-good SHA. Uses -fd (NOT -fdx): -x would delete
+# ignored files such as node_modules, which is catastrophic in CI. ci-output.txt
+# and e2e-*.env / e2e-quarantine.* are preserved for Jenkins archive.
+# run.sh also calls this once at phase-1 start so Compile/postinstall noise
+# (untracked caches, etc.) is not swept into the autofix patch.
+restore_tree() {
+  local sha="$1"
+  git reset --hard "$sha" >/dev/null 2>&1 || true
+  git clean -fdq \
+    -e ci-output.txt \
+    -e e2e-failure.env \
+    -e e2e-isolation.env \
+    -e e2e-quarantine.patch \
+    -e e2e-quarantine.env \
+    >/dev/null 2>&1 || true
+}

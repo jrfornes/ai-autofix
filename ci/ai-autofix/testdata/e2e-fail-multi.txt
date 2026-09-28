@@ -1,0 +1,59 @@
+# Multi-fail: end summary lists two failures — first title must win.
+
+> nx run acme-app-e2e:e2e --browser=chromium --env.grepTags=-@flaky
+
+  Running:  src/e2e/spectrum-navigation.cy.ts                                 (1 of 1)
+
+
+  Spectrum Navigation
+    1) opens heatmap from session list
+    2) returns to calendar after close
+
+
+  0 passing (4s)
+  2 failing
+
+  1) Spectrum Navigation
+       opens heatmap from session list:
+     AssertionError: expected false to be true
+
+  2) Spectrum Navigation
+       returns to calendar after close:
+     AssertionError: expected 0 to equal 1
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  (Results)
+
+  ┌────────────────────────────────────────────────────────────────────────────────────────────────┐
+  │ Tests:        2                                                                                │
+  │ Passing:      0                                                                                │
+  │ Failing:      2                                                                                │
+  │ Pending:      0                                                                                │
+  │ Skipped:      0                                                                                │
+  │ Screenshots:  0                                                                                │
+  │ Video:        false                                                                            │
+  │ Duration:     4 seconds                                                                        │
+  │ Spec Ran:     src/e2e/spectrum-navigation.cy.ts                                                │
+  └────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+                                                                                                    
+  2 failing
+
+  1) Spectrum Navigation
+       opens heatmap from session list:
+     AssertionError: expected false to be true
+
+  2) Spectrum Navigation
+       returns to calendar after close:
+     AssertionError: expected 0 to equal 1
+
+
+ NX   Running target e2e for 1 project failed
+
+Failed tasks:
+
+- acme-app-e2e:e2e

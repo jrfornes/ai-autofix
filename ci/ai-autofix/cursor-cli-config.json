@@ -1,0 +1,11 @@
+{
+  "//": "Copied into a scratch HOME by agent-fix.sh. Defense-in-depth only: the",
+  "//2": "primary boundary is the CI runner sandbox (no publish creds in env,",
+  "//3": "network egress restricted to the Cursor API). Shell is denied so the",
+  "//4": "agent can edit files but cannot execute commands or exfiltrate secrets.",
+  "approvalMode": "allowlist",
+  "permissions": {
+    "allow": ["Read(**)", "Write(**)"],
+    "deny": ["Shell(*)"]
+  }
+}
