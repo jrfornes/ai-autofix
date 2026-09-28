@@ -163,7 +163,7 @@ should be taken together.
 
 ## Phase A — Deterministic Format/Lint fix
 
-**Status:** Not yet reviewed
+**Status:** Reviewed — action list agreed, sequencing open
 **Code:** `run.sh`, `lib.sh` (`deterministic_fix`, `verify_cmd`, `gate_patch`)
 
 **Today:** On a Check Format or Lint failure, `run.sh` runs with no Bitbucket
@@ -174,14 +174,95 @@ through the path gate, then proves it by applying to a pristine tree and
 re-running the real stage check. Only a genuine pass emits an artifact. Every
 gate fails open with exit 0 so the original build failure stays the signal.
 
-**Issues:** _to be filled during review._
+The goal for this phase is narrow and worth restating: **offer an autofix when
+Format or Lint fails.** The machinery already does that. What follows is about
+making it correct in more cases, helpful in more cases, and cheaper to act on.
 
-**Open questions to seed the review:**
+### Actions — correctness
+
+Small, independent, no policy implications.
+
+**A1. Make the fixer and the verifier cover the same range.** `verify_cmd`
+calls `format:check --base origin/$CHANGE_TARGET --head HEAD`, but
+`deterministic_fix` calls `format:write --base origin/$CHANGE_TARGET` with no
+`--head`. The set we fix is not guaranteed to equal the set we check. One-word
+fix; removes a category of "fixed it, verify still fails."
+
+**A2. Verify both Format and Lint, not only the failed stage.**
+`try_publishable_patch` calls `verify_cmd "$FAILED_STAGE"`. If `eslint --fix`
+emits code Prettier disagrees with, the patch passes Lint verification and then
+breaks Check Format on the next build. Running `format:write` as a
+normalization step after `lint --fix` is nearly free insurance.
+*Verify first:* whether the ESLint config includes `eslint-config-prettier`. If
+it does the risk is largely theoretical; if not, this is live.
+
+**A3. Build the patch from tracked changes only.** Today it is `git add -A`
+followed by `git diff --cached`, so a stray untracked file that is not
+gitignored can ride along. The path gate blocks *denied* paths but accepts an
+unexpected source file. Formatters and linters never create files, so
+`git diff HEAD` loses nothing and makes stray content structurally impossible.
+
+### Actions — coverage
+
+**A4. Support partial fixes.** The biggest usefulness gap. If `lint --fix`
+resolves nine violations and one needs a human, verification fails and the
+whole patch is discarded — the contributor gets nothing despite nine being
+fixable. Add a third outcome: comment-only, never apply, labelled honestly as
+"fixes 9 of 10." This needs before/after violation counts, which is the one
+legitimate use for ESLint JSON via the executor's `outputFile` — measuring, not
+fixing, consistent with the Phase 0 conclusion.
+
+**A5. Consider running both fixers whenever either stage fails.** The pipeline
+aborts at the first failure, so when Check Format fails, Lint never runs. Fix
+only Format and the contributor pushes, Lint then fails, and that is a second
+round trip. Tradeoff: verify cost doubles, and we must not claim to have
+verified a stage that never failed.
+
+### Actions — delivery
+
+**A6. Reconsider the sibling PR for Format/Lint.** `apply` mode opens a whole
+PR into the feature branch for what is often a whitespace diff, which the
+contributor must then merge. The E2E path already pushes straight to the branch
+tip — and that is the *riskier* change, since it alters test semantics. A
+deterministic, verified formatting fix has a stronger claim to direct push than
+quarantining does.
+
+**A7. A6 requires rethinking the loop guard.** `open-bitbucket-pr.sh` writes
+the `Cursor-Autofix: true` trailer, and `is_bot_change` treats that on HEAD as
+"came from autofix, skip." Pushing that trailer directly onto the feature
+branch would disable Format/Lint autofix for the remainder of the PR — exactly
+why the E2E path invented a separate `e2e-flake` trailer. A6 and A7 move
+together or not at all.
+
+**A8. Split the mode parameter per path.** A single `AI_AUTOFIX_MODE` forces
+the same risk appetite on deterministic formatting and on test quarantining.
+Separate knobs allow Format/Lint in `apply` while E2E stays in `plan`.
+
+**A9. Always leave a trace.** A no-op today is an `echo` into the Jenkins
+console that nobody reads. A one-line PR comment saying autofix ran and why it
+could not help is the difference between a feature people trust and one they do
+not know exists. Same principle as Phase B: prefer a loud failure to a clever
+one.
+
+### Actions — cleanup
+
+**A10.** Drop the unused capture and the vacuous existence gate, and move the
+remaining E2E capture out of the repo root. See Phase 0.
+
+**A11. Add a happy-path test.** `validate-gates.sh` covers gates and skip
+conditions thoroughly but never exercises produce → gate → verify → emit with a
+stub fixer, so the core loop is untested.
+
+### Suggested first slice
+
+A1, A2, A3 and A9 — small, independent, no policy implications. A4 is the one
+that changes how often the feature actually pays off.
+
+### Still open
 
 - `verify_cmd` re-runs the full stage check, which on a large `nx affected` set
-  may dominate the post-failure budget. Is the cost acceptable?
-- The fixer runs against the whole affected set, not just the files that
-  failed. Is a narrower invocation worth it?
+  may dominate the post-failure budget. Probably unavoidable if we want a real
+  green, but the cost should be measured.
 - Is "deterministic only" still the intended ceiling, or is the parked agent
   tier expected to come back? (See the parked-component section.)
 
@@ -491,3 +572,4 @@ Small, already-identified, not yet scheduled:
 | 2026-09-28 | B     | Fix POSIX portability + fixture drift as an immediate patch (PR #1).      |
 | 2026-09-28 | B     | Direction: `after:spec` structured JSON, log parser retained as fallback. Not yet committed — needs a spike against the real monorepo. |
 | 2026-09-28 | 0     | Finding: the Format/Lint capture is never read — `run.sh` only tests that the file exists. Direction: drop the capture where unconsumed, delete the gate, relocate the E2E capture outside the repo root. Coupled to the parked-agent decision. |
+| 2026-09-28 | A     | Action list A1–A11 agreed. First slice: A1, A2, A3, A9. A4 (partial fixes) is the largest usefulness win. A6/A7 (direct push vs sibling PR, and the loop-guard trailer) move together or not at all. |
