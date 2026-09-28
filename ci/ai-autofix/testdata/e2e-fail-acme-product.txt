@@ -2,21 +2,21 @@
 
 > nx run acme-app-e2e:e2e --browser=chromium --env.grepTags=-@flaky
 
-  Running:  src/e2e/alarm-central/local/alarms.cy.ts                          (1 of 2)
+  Running:  src/e2e/module-a/local/products.cy.ts                          (1 of 2)
 
 
-  Alarm Central - Local Alarms
-    ✓ lists alarms in the table (1234ms)
+  Module A
+    ✓ lists products in the table (1234ms)
     1) should show chevron link properly.
 
 
   1 passing (2s)
   1 failing
 
-  1) Alarm Central - Local Alarms
+  1) Module A
        should show chevron link properly.:
      AssertionError: Timed out retrying after 15000ms: Expected to find element: `[data-cy=chevron-link]`, but never found it.
-      at Context.eval (webpack://acme-app-e2e/./src/e2e/alarm-central/local/alarms.cy.ts:42:0)
+      at Context.eval (webpack://acme-app-e2e/./src/e2e/module-a/local/products.cy.ts:42:0)
 
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -32,7 +32,7 @@
   │ Screenshots:  0                                                                                │
   │ Video:        false                                                                            │
   │ Duration:     3 seconds                                                                        │
-  │ Spec Ran:     src/e2e/alarm-central/local/alarms.cy.ts                                         │
+  │ Spec Ran:     src/e2e/module-a/local/products.cy.ts                                         │
   └────────────────────────────────────────────────────────────────────────────────────────────────┘
 
 
@@ -40,7 +40,7 @@
                                                                                                     
   1 failing
 
-  1) Alarm Central - Local Alarms
+  1) Module A
        should show chevron link properly.:
      AssertionError: Timed out retrying after 15000ms: Expected to find element: `[data-cy=chevron-link]`, but never found it.
 
