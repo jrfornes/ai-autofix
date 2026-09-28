@@ -53,7 +53,7 @@ harness. And one parked component: the Tier 1 Cursor agent.
 
 ## Phase 0 — Capture
 
-**Status:** Not yet reviewed
+**Status:** In review — Format/Lint scope reviewed, E2E capture still open
 **Code:** `pipeline-helpers.groovy` (`runCaptured`), `Jenkinsfile` stage blocks
 
 **Today:** Each instrumented stage runs inside the CI Docker image with stdout
@@ -67,17 +67,97 @@ a **tail**, which is the correct choice for a Cypress log, since the end-of-run
 summary is exactly what the parser needs. Any redesign that starts reading from
 the top of the log inherits a truncation hazard that does not exist today.
 
-**Issues:** _to be filled during review._
+### Issues — Format/Lint scope
 
-**Open questions to seed the review:**
+**The capture is unused on this path.** Nothing in Phase A ever reads
+`ci-output.txt`. `run.sh:34` checks only that the file *exists*:
 
-- Is 200 KiB enough for a Lint failure across a wide `nx affected` set?
-- `ci-output.txt` is written into the repo root, which is why `tree_is_clean`
-  and `restore_tree` both carry explicit exclusions for it and the E2E
-  artifacts. Would a directory outside the repo remove a whole class of
-  special-casing?
+```sh
+[[ -f ci-output.txt ]] || { log "ci-output.txt missing; skipping"; exit 0; }
+```
+
+So on the Format/Lint path we produce up to 200 KiB of captured text purely so
+that a file exists. It is a gate token, not data. The only consumers of the
+*contents* anywhere in the repo are `parse-e2e-failure.sh` and the parked
+`agent-fix.sh` / `PROMPT.md`.
+
+**Most instrumented stages need no capture at all.** `runCaptured` wraps five
+stages — Check Format, Lint, Unit Tests, E2E Tests, Build. Exactly one of them
+has its text consumed. Unit Tests and Build are not even autofix-eligible, so
+their captures are entirely dead.
+
+**The gate is close to vacuous.** `tail` runs regardless of the command's exit
+status, so the file exists after any instrumented stage, passing or failing. It
+cannot distinguish "we captured a failure" from "docker ran at all." It is
+effectively unfalsifiable rather than a real precondition.
+
+**The location costs more than the bytes.** Because the file is written to the
+repo root, five places exist solely to stop it being read as a dirty tree or
+swept into a patch: `_E2E_ARTIFACT_RE` and the `-e` list in `restore_tree`
+(`lib.sh`), two `grep -vE` filters in `run.sh`, and
+`git add -A -- ':(exclude)ci-output.txt'`. This tax already grew once, when the
+E2E artifacts had to be added to the same lists.
+
+**Two smaller footguns in `runCaptured`:**
+
+- The shell script is assembled by Groovy string concatenation
+  (`''' + command + '''`). A command containing a quote would behave
+  surprisingly; one containing `'''` would break the build. All five current
+  commands are simple, so this is latent, not active.
+- `tail -c` cuts on a byte boundary, so it can split a line and mangle UTF-8 at
+  the head of the file. Harmless for the E2E parser only because that parser
+  reads from the end — luck, not design. `tail -n` would be line-safe.
+
+Not a defect, but worth writing down: `set -uo pipefail` without `-e` is
+deliberate and correct here, since the real status is recovered from
+`PIPESTATUS[0]`.
+
+### Options — Format/Lint scope
+
+**1. Stop capturing on Check Format, Lint, Unit Tests and Build.** A plain `sh`
+step inside the same try/catch that records `FAILED_STAGE` gives Phase A
+everything it consumes, because `FAILED_STAGE` plus `CHANGE_TARGET` is the
+entire input. Jenkins already retains full console output for humans, so
+nothing is lost. The existence gate in `run.sh` should then be deleted outright
+rather than left as a check that cannot meaningfully fail.
+
+**2. Move any remaining capture out of the working tree**, into a sibling
+directory of the pattern `AI_AUTOFIX_ARTIFACT_DIR` already uses. This is the
+one change that helps the E2E path too, and it deletes all five exclusions.
+
+**3. If we want structured Format/Lint data, take it from the tools.** The
+`@nx/eslint:lint` executor exposes `format` and `outputFile`, so ESLint JSON
+can be written directly; `nx format:check` already emits a plain file list. But
+this would be for *reporting* — a richer PR comment such as "7 rules across 3
+files" — and not for fixing.
+
+The reason option 3 is optional is the most important finding of this review:
+**Phase A deliberately recomputes rather than parses.** The fixer reruns
+`nx format:write` / `lint --fix` over the affected set and never needs to know
+which files failed. That is the correct design, and it is precisely why the log
+went unread. Any redesign should preserve "recompute, don't parse" and treat
+captured text as a reporting concern only.
+
+### Decision
+
+Open, but the direction is to drop the capture on the three or four stages that
+do not consume it, delete the vacuous gate, and relocate the remaining E2E
+capture outside the repo root.
+
+**Coupling to flag:** `PROMPT.md` instructs the parked Tier 1 agent to read
+`ci-output.txt`. Dropping the Format/Lint capture is safe while the agent stays
+parked, so the capture decision and the revive-or-delete decision on the agent
+should be taken together.
+
+### Still open for Phase 0
+
+- Whether the E2E capture keeps a byte tail or moves to a line tail.
+- Whether 200 KiB would have been enough for a wide `nx affected` Lint failure
+  — now moot if the capture is dropped on that path.
 - Nothing records *which* stage produced `ci-output.txt` inside the file
-  itself; correlation is via `FAILED_STAGE` only.
+  itself; correlation is via `FAILED_STAGE` only. Each instrumented stage
+  overwrites it, so it holds the last stage to run. Correct in practice only
+  because the pipeline aborts on failure.
 
 ---
 
@@ -410,3 +490,4 @@ Small, already-identified, not yet scheduled:
 | ---------- | ----- | ------------------------------------------------------------------------ |
 | 2026-09-28 | B     | Fix POSIX portability + fixture drift as an immediate patch (PR #1).      |
 | 2026-09-28 | B     | Direction: `after:spec` structured JSON, log parser retained as fallback. Not yet committed — needs a spike against the real monorepo. |
+| 2026-09-28 | 0     | Finding: the Format/Lint capture is never read — `run.sh` only tests that the file exists. Direction: drop the capture where unconsumed, delete the gate, relocate the E2E capture outside the repo root. Coupled to the parked-agent decision. |
