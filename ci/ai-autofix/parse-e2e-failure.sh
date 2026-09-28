@@ -24,7 +24,8 @@ trap 'rm -f "$STRIPPED"' EXIT
 sed -E 's/\x1B\[[0-9;?]*[a-zA-Z]//g' "$LOG" >"$STRIPPED"
 
 # Project-relative spec: *.cy.ts | *.cy.js (optionally under dirs).
-SPEC_RE='((?:[^[:space:]]+/)*[^[:space:]]+\.cy\.(ts|js))'
+# POSIX ERE only — grep -E has no non-capturing '(?:' group.
+SPEC_RE='(([^[:space:]]+/)*[^[:space:]]+\.cy\.(ts|js))'
 
 normalize_spec() {
   local raw="$1" project="$2"
@@ -66,9 +67,11 @@ first_block="$(printf '%s\n' "$summary" | awk '
 [[ -n "$first_block" ]] || die "no '1)' entry after failing summary"
 
 # Leaf title: indented line after "1) Suite", trailing colon stripped.
+# Interval expressions ({2,}) are unsupported by mawk/busybox awk, so the
+# two-or-more indent is spelled out longhand.
 title="$(printf '%s\n' "$first_block" | awk '
   NR==1 { next }
-  /^[[:space:]]{2,}[^[:space:]0-9]/ {
+  /^[[:space:]][[:space:]]+[^[:space:]0-9]/ {
     line=$0
     sub(/^[[:space:]]+/, "", line)
     sub(/:[[:space:]]*$/, "", line)
