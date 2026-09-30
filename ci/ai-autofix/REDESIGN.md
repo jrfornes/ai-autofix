@@ -30,7 +30,8 @@ empty section is a signal, not an oversight.
 **Follow-ups:**  concrete work items
 ```
 
-Two rules that came out of the Phase B review and are worth keeping:
+Three rules, the first two from the Phase B review and the third from the
+C/D/E pass:
 
 1. **Prefer a loud failure to a clever one.** Most of what we found in Phase B
    was not "wrong output" but "no output, logged as ambiguity." Silent
@@ -39,6 +40,20 @@ Two rules that came out of the Phase B review and are worth keeping:
    `apps/` tree, no `ci/Dockerfile`, no `ci/nx-e2e-affected.sh`. Anything that
    depends on the real monorepo gets written down as an open question rather
    than assumed.
+3. **Quote at every boundary, and gate the quoting.** Test titles are written by
+   PR authors, scraped out of a log, and eventually sourced into a shell that
+   holds the Bitbucket token. That chain is safe today only because every
+   producer writes `printf %q`, and nothing enforces it. Same principle as the
+   path gate: if it matters, it is a check, not a convention.
+
+**Scope of the 2026-09-30 pass.** Phases C, D, E and the three cross-cutting
+concerns, reviewed against the post-pivot system only — findings that die with
+Format/Lint are noted as such and not pursued, so nobody spends effort fixing
+code that is about to be deleted. Method was reading the code and exercising
+`lib.sh`, the gates and the fixtures locally on a `mawk 1.3.4` box. Nothing was
+run against the real monorepo or a real Jenkins agent, so every finding is
+either demonstrated locally (and says so) or marked as needing confirmation.
+With this pass every phase has been through review at least once.
 
 ## Phase map (post-pivot)
 
@@ -172,7 +187,7 @@ uses `git diff -- "$SPEC_PATH"` rather than `git add -A`.
 
 ## Phase 0 — Capture
 
-**Status:** In review — Format/Lint scope closed by the pivot, E2E capture open
+**Status:** In review — capture location still coupled to the Phase B decision
 **Code:** `pipeline-helpers.groovy` (`runCaptured`), `Jenkinsfile` stage blocks
 
 **Today:** Each instrumented stage runs inside the CI Docker image with stdout
@@ -226,7 +241,18 @@ the real status is recovered from `PIPESTATUS[0]`.
 ### Still open
 
 - If Phase B moves to `after:spec` JSON, does the text capture stay as the
-  fallback, or does it go too? These decisions are coupled.
+  fallback, or does it go too? These decisions are coupled. The 2026-09-30 pass
+  narrows it rather than settling it: the hard-kill case in Phase B's timing
+  analysis is a real E2E failure mode, and Phase C's own `timeout` is one of its
+  causes, so something has to survive a killed run. Keeping the tail as the
+  fallback is the cheap answer; the alternative is accepting that a timed-out
+  E2E run produces no verdict at all, which may be perfectly acceptable since a
+  20-minute hang is not a flake.
+- P0-2 and Phase B's results directory want the same decision about where
+  artifacts live. One consideration for it: the parser runs on the agent while
+  Cypress writes inside the container, so the location has to be reachable and
+  writable from both, which the workspace currently is and a path outside the
+  repo may not be.
 
 ---
 
@@ -380,8 +406,11 @@ controls for environment differences that isolation does not.
 
 ### Open questions
 
-- Which `awk` is in the real CI Docker image? Determines whether the `mawk` bug
-  was actually firing in production or was latent.
+- Which `awk` is on the **Jenkins agent**? Revised by the 2026-09-30 pass: the
+  parser runs in a bare `sh` step, not inside the container, so the CI image's
+  awk never touches it. See the harness section. The suite now passes under
+  `mawk 1.3.4`, so the PR #1 fix is confirmed against the dialect that broke it
+  either way.
 - Are Cypress retries enabled on PR runs? Gates the opportunity above.
 - Does the spec path survive into JUnit XML with our reporter version?
 - Is there a shared Nx e2e preset, or is `cypress.config.ts` duplicated per
@@ -391,7 +420,7 @@ controls for environment differences that isolation does not.
 
 ## Phase C — E2E isolation re-run
 
-**Status:** Not yet reviewed — now the highest-value phase to review
+**Status:** Reviewed — actions recorded, N-of-M still open
 **Code:** `isolate-e2e-failure.sh`
 
 **Today:** Given `e2e-failure.env`, re-runs that single test via
@@ -406,29 +435,112 @@ exit codes 124 and 143. Kill switch `SKIP_E2E_ISOLATION`.
 evidence. Everything the system claims rests on the strength of what happens
 here.
 
-**Open questions to seed the review:**
+### Findings
 
-- `ATTEMPTS=1` is hardcoded. One green re-run is thin evidence for the only
-  decision the system makes. What is the right N-of-M, and what runtime is it
-  worth?
-- Title matching goes through a regex-escaped `--env.grep`, which is a
-  substring match — two tests whose titles share a prefix could both run. The
-  `Tests: N` check confirms *something* ran, not that the *right* thing ran.
-  This is now the primary correctness risk in the system.
-- A genuinely order-dependent test passes in isolation and gets quarantined as
-  flaky. Can we distinguish? Running the whole spec rather than one grep-ed
-  test would be one signal.
-- Unlike `tag-e2e-flaky.sh`, this script does not honor an `AUTOFIX_ROOT`
-  override, which is why six tests in `validate-gates.sh` cannot pass outside
-  the monorepo.
-- Should the isolation verdict record *why* we believe a flake, in a form the
-  PR comment can quote?
+**The re-run is not the same run.** This is the finding that matters most, and
+it is not about `ATTEMPTS`. The failing stage executes
+`./ci/nx-e2e-affected.sh "${CHANGE_TARGET}" "-@flaky"`; isolation executes
+`npx nx run <project>:e2e --browser=chromium --spec=... --env.grep=...`
+directly. Two differences fall out of that, and both bias the verdict toward
+`pass`:
+
+- **Browser.** `--browser=chromium` is hardcoded here. What the real suite uses
+  is invisible from this extract (`ci/nx-e2e-affected.sh` is not in the repo).
+  If they differ, a `pass` verdict means "the test passes in a different
+  browser," which is not evidence of flakiness at all.
+- **Everything that wrapper does.** Any base URL, serve target, fixture seeding,
+  retry setting or parallelism configured inside `nx-e2e-affected.sh` is skipped.
+  `NX_PARALLEL_E2E=2` is set at pipeline level and not reproduced here, which is
+  arguably correct for isolation, but it is an accident rather than a decision.
+
+A test that fails under contention and passes alone is exactly what we want to
+detect; a test that fails in Electron and passes in Chromium is a false
+quarantine. Today we cannot tell those apart, and the verdict file does not
+record enough to let a human tell either. **Confirm the real browser and
+wrapper behaviour before enabling `apply`.**
+
+**`--env.grep` is a substring match, but the tagger is exact — so the risk is
+inflated evidence, not a mis-tag.** Two tests whose titles share a prefix can
+both run, and `Tests: N >= 1` cannot tell the difference. The blast radius is
+smaller than it first looks, because `tag-e2e-flaky.mjs` matches the title
+exactly and aborts on duplicates, so Phase D will not tag the wrong test. What
+we get instead is a `pass` verdict earned partly by a *different* test's green.
+Recording the matched count in the verdict would close this: `Tests: 1` is the
+only count that supports the claim we are making.
+
+**`escape_grep` handles regex metacharacters but not `@cypress/grep`'s own
+syntax.** It escapes `][(){}.^$*+?|\` for the JS `RegExp`, which is right as
+far as it goes. Two title shapes bypass it, both needing a check against the
+pinned version: a title containing `;`, which that plugin treats as a separator
+between alternative title filters, and a title *starting* with `-`, which it
+reads as an inverted filter. Either turns the grep into something other than
+"run this one test," and the `Tests: N` guard would not necessarily notice.
+
+**The verdict depends on log scraping, which Phase B is moving away from.**
+`tests_ran_ge_1` greps `Tests:[[:space:]]+[0-9]+` out of the isolation log —
+the same class of fragility as the parser, in the script that produces the
+evidence. When `after:spec` JSON lands it should be consumed *here too*, which
+turns "did something run" into "this exact test ran, and here is its state and
+its `attempts[]`." That is a strictly better verdict from the same work.
+
+**Layout is hardcoded in three places.** `SPEC_PATH="apps/${E2E_PROJECT}/..."`
+here, the same expression in `tag-e2e-flaky.sh`, and `/apps/` inside
+`normalize_spec`. Any e2e project outside `apps/` silently produces an `error`
+verdict. Cheap to centralise while both scripts are being touched.
+
+**`ATTEMPTS=1` is hardcoded but emitted as `ISOLATION_ATTEMPTS`**, which reads
+like a configurable knob in the artifact and is not one. Either wire it up or
+stop advertising it.
+
+**The `timeout` guard is shallower than it looks.** `timeout 20m` wraps `npx`,
+so on expiry the signal goes to the Node wrapper; Cypress and browser children
+can outlive it. Verdict is correctly `error` (124/143 are both handled), but
+orphaned processes on a long-lived agent are a plausible source of later,
+unrelated E2E flakiness — which this system would then diagnose as flakiness.
+
+**The dry-run ordering is why six checks cannot pass.** The spec-existence
+guard runs *before* the `ISOLATE_E2E_DRY_RUN` branch, so outside the monorepo
+the script errors out before it can print argv. Adding the `AUTOFIX_ROOT`
+override that `tag-e2e-flaky.sh` already has is what makes the group pass;
+locally reproduced — all six failures are this one group, and they all report
+`result=error`.
+
+Worth keeping: the always-write-a-verdict discipline, the `unset` of ambient
+`E2E_*` before sourcing (fail-closed on env leakage), and `%q` on every value.
+
+### Actions
+
+- **C-1.** Add an `AUTOFIX_ROOT` override and move the dry-run branch above the
+  spec-existence guard. Makes `validate-gates.sh` green standalone.
+- **C-2.** Confirm the real browser and inherit it rather than hardcoding
+  `chromium`; record the browser in the verdict.
+- **C-3.** Record *evidence* in the verdict, not just an outcome: matched test
+  count, browser, attempts, duration, and the exact argv. Phase E needs this to
+  write an honest comment.
+- **C-4.** Reject a verdict of `pass` when more than one test matched.
+- **C-5.** Check `;` and leading-`-` title handling against the pinned
+  `@cypress/grep`, and extend `escape_grep` or reject such titles outright.
+- **C-6.** Centralise the `apps/<project>/<spec>` layout assumption.
+- **C-7.** Consume Phase B's `after:spec` JSON here once it exists, replacing
+  `tests_ran_ge_1`.
+
+### Still open
+
+- **N-of-M.** Unresolved, and it is the central judgement call of the redesign.
+  Two sub-questions worth separating: how many re-runs make a `pass` credible,
+  and whether re-running the *whole spec* once is better evidence than
+  re-running one grep-ed test N times. The second also partly addresses
+  order-dependence, since a spec-level re-run preserves within-spec ordering.
+  If Phase B's retry `attempts[]` signal is available, it may outrank both.
+- Whether `SKIP_E2E_ISOLATION` should also suppress Phase D, rather than
+  relying on the `skipped` verdict failing the `pass` check downstream. It
+  works today; it is implicit.
 
 ---
 
 ## Phase D — Quarantine patch
 
-**Status:** Not yet reviewed
+**Status:** Reviewed — one blocking finding, un-quarantine mechanism open
 **Code:** `tag-e2e-flaky.sh`, `tag-e2e-flaky.mjs`,
 `lib.sh` (`gate_e2e_quarantine_patch`)
 
@@ -445,23 +557,113 @@ not leave `it.only`. The working tree is restored either way. Kill switch
 This is the best-tested part of the system — all the tagger shape fixtures
 under `testdata/quarantine/` pass.
 
-**Open questions to seed the review:**
+### Findings
 
-- **Nothing ever removes `@flaky`.** Quarantine is one-way, so coverage decays
-  silently. Post-pivot this is the system's main long-term risk: unchecked, the
-  only thing it does is progressively disable the test suite. A companion
-  un-quarantine process may be a requirement rather than a nice-to-have.
-- Is there a cap? Quarantining the tenth test in a spec should probably
-  escalate to a human rather than proceed.
-- Template-literal titles abort. How common are they in the real specs?
-- The tagger is bespoke parsing logic. Would a real TS AST (ts-morph,
-  jscodeshift) be more robust, or is that overkill for a signature edit?
+**Blocking: `@flaky` currently means "never runs again," not "runs in the
+tolerant stage."** The design intent is that quarantined tests keep running in
+`E2E Tests - Flaky`, where a failure logs and continues. In practice that stage
+cannot run at all:
+
+```
+when { not { expression { return params.SKIP_E2E_FLAKY_TESTS ?: true } } }
+```
+
+`SKIP_E2E_FLAKY_TESTS` defaults to `true`, so the stage is off by default — and
+because Groovy's `?:` returns its right operand for *any* falsy left operand,
+setting the parameter to `false` yields `false ?: true` → `true`. The stage is
+skipped whichever way the box is ticked. Unticking it is not an escape hatch;
+it is a no-op. (`Jenkinsfile:167`. The same idiom appears at `:95`, `:148`,
+`:221`, `:246` and `:277`, and is harmless at all of them because their
+fallback is `false` — which is what a falsy parameter should yield anyway. Only
+a `?: true` fallback can swallow a deliberate `false`. The null-safe form is
+`params.X == null ? true : params.X`.)
+
+So today quarantining a test deletes it from CI with no residual signal
+anywhere. Every concern the pivot raises about one-way decay is not a future
+risk but the current state, and the cause is one line of Groovy. **This should
+be fixed before `apply` mode is enabled for anyone**, because the difference
+between "we moved this test to a tolerant stage" and "we switched this test off"
+is the difference between a defensible feature and an indefensible one.
+
+**The gate does not bound how much it can quarantine.** Verified locally: a
+single-file patch with three separate `it()` signature hunks, each adding
+`@flaky`, passes `gate_e2e_quarantine_patch` cleanly. The tagger only ever tags
+one test, so this is not reachable today — but post-pivot this gate is the only
+mechanical check in the system, and it should constrain the output rather than
+rely on the producer's good behaviour. Same for the title: the gate checks the
+*path* against the verdict, never the title, so a patch tagging the wrong test
+in the right file would pass. The tagger's exact-match-and-abort is what
+actually prevents that.
+
+**There is no cumulative budget.** Each build can quarantine one test; nothing
+counts how many are already tagged in the spec, the project, or the PR. A
+chronically unstable suite converges on fully disabled, one green build at a
+time, and no single decision in that sequence ever looks wrong.
+
+**The restore is silent on failure.** `git checkout -- "$SPEC_PATH"` is
+`|| true` in both the error and success paths. If it ever fails the modified
+spec stays in the workspace, and the symptom surfaces later and elsewhere as
+Phase E's `patch no longer applies on origin/<branch>` — a confusing error that
+points at the wrong script.
+
+**The layout assumption repeats here** (`apps/${E2E_PROJECT}/${E2E_SPEC}`); see
+action C-6.
+
+**The tagger itself holds up well.** The string/template/comment skipping is
+careful, the abort conditions are conservative in the right direction, and the
+gate correctly rejects the dangerous shapes — a patch that deletes a test body
+is refused because the body lines match the non-signature denylist. The
+allowlist ("every changed line must be an `it()` signature, `tags:`, or
+`@flaky`") is what makes it safe, and it is the part to preserve verbatim in any
+rewrite.
+
+### Options for the un-quarantine problem
+
+Ordered by how much machinery they need, all compatible with each other:
+
+1. **Expiry in the tag.** `tags: ['@flaky']` becomes `['@flaky-2026-10']` or a
+   companion comment with a date, plus a scheduled job that reports (or
+   un-tags) anything past its date. Cheap, but adds a second tag vocabulary the
+   grep filters must understand.
+2. **Report, don't decide.** A scheduled build that runs the `@flaky` set N
+   times and opens a ticket listing tests that have passed every time for a
+   month. Humans remove the tag. No new gating logic, no risk of the system
+   silently re-enabling a broken test.
+3. **Budget with escalation.** Refuse to quarantine when the spec or project is
+   already over a threshold; comment on the PR instead. Bounds the decay
+   without needing anything to remove tags.
+
+Option 2 is the honest counterpart to this system's own design principle: a
+machine that quarantines should not also be the machine that judges when to
+stop. Option 3 is the cheapest thing that prevents unbounded decay and does not
+depend on anyone acting on a report.
+
+### Decision
+
+- Fix `Jenkinsfile:167` and make the flaky stage genuinely runnable. Recorded as
+  blocking for `apply` mode.
+- Keep the bespoke tagger. A TS AST would be more robust in principle, but it
+  needs a dependency available inside the CI image at post-failure time, and the
+  gate already refuses everything the scanner could plausibly get wrong. Not
+  worth the trade for a signature edit.
+- Tighten the gate to one tagged test per patch, and check the title.
+- Un-quarantine mechanism: **open**, but not optional. Recommendation is option
+  3 now (bounded decay, no new vocabulary) and option 2 next.
+
+### Still open
+
+- How common are template-literal titles in the real specs? Determines whether
+  the abort path is a rare edge case or a routine dead end. Needs the monorepo.
+- Should a quarantine carry attribution — who, which build, which verdict — into
+  the spec file as a comment, so the next reader of the test knows why it is
+  tagged? The commit trailer has this, but nobody reads a commit trailer while
+  looking at a test.
 
 ---
 
 ## Phase E — Publish
 
-**Status:** Not yet reviewed
+**Status:** Reviewed — actions recorded, apply-mode default open
 **Code:** `push-e2e-quarantine.sh`, `comment-bitbucket-pr.sh`
 
 **Today (post-pivot):** `plan` mode comments the gated diff on the PR; `apply`
@@ -469,67 +671,262 @@ mode commits it onto the `CHANGE_BRANCH` tip with a `Cursor-Autofix: e2e-flake`
 trailer — no force push, no sibling PR, staging only the gated paths, refusing
 main and master. Nothing ever auto-merges.
 
-**Open questions to seed the review:**
+### Findings
 
-- The comment should now carry the *evidence*, not just the diff: what was
-  re-run, how many times, and explicitly what that does and does not prove.
-  This is the main mitigation for losing `verify_cmd`.
-- **A9 — always leave a trace.** Today a no-op is an `echo` nobody reads. When
-  the system does nothing, say so on the PR.
-- Bitbucket workspace and slug are hardcoded defaults.
-- `comment-bitbucket-pr.sh` inlines the whole patch with no size cap, and
-  builds JSON with `python3` or `jq`, whichever exists — two code paths for one
-  job, now worth collapsing since the file is being touched anyway.
-- Narrow the token to comment + push, dropping create-PR.
+**The token is on the command line in both publish paths.** `curl -H
+"Authorization: Bearer ${TOKEN}"` and `git push
+"https://x-token-auth:${TOKEN}@bitbucket.org/..."` both put the secret in
+process arguments, readable via `ps` by anything else on that agent for the
+duration of the call. The git form is the worse of the two: a push failure can
+echo the remote URL into the build log, and Jenkins credential masking is the
+only thing standing between that and a leaked token in a publicly readable
+build page. Both have direct fixes — `curl --config` or a header file, and
+`git -c http.extraHeader=...` with a credential helper or a URL without inline
+credentials.
+
+**Apply mode pushes silently.** In `apply` mode the contributor gets a commit
+on their branch and no PR comment explaining it. The commit message carries the
+reasoning, which nobody sees unless they look. This is the same gap as carried
+action **A9** and, post-pivot, it is worse than a missing trace: the system is
+now making a judgement call rather than applying a verified fix, so *every*
+apply needs a visible, quotable justification on the PR. Apply should comment
+**and** push, with the evidence from action C-3.
+
+**The loop guard checks the wrong ref.** `is_e2e_flake_head` inspects the build's
+local `HEAD` before the script fetches, but what matters is whether the tip it is
+about to push onto already carries a quarantine commit. On a PR build `HEAD` is
+whatever Jenkins checked out, which is not `origin/<CHANGE_BRANCH>` after the
+fetch. The real protection against a repeated push is the `git diff --cached
+--quiet` check plus the gate's "must introduce `@flaky`" rule — both sound, so
+the guard is redundant rather than dangerous, but it does not do what its name
+says. Move the check after the fetch and run it against `TIP`.
+
+**`git fetch origin` may not be authenticated in the post block.** Jenkins binds
+SCM credentials for `checkout scm`; a bare `git fetch origin` later in
+`post { failure { ... } }` relies on the remote URL still being usable. If it is
+not, the script dies with `fetch origin/<branch> failed` and the whole phase
+disappears with a log line. The script already holds a token — fetching from the
+same tokenized URL it pushes to would remove the dependency. Needs confirmation
+against the real agent.
+
+**De-branding missed the publish defaults.** `BITBUCKET_WORKSPACE` defaults to
+`workassureonline` and `BITBUCKET_REPO_SLUG` to `acme-ui` in both scripts. One of
+those looks like a real workspace name rather than a placeholder. Whatever the
+outcome, defaults that point at a specific real repository are the wrong shape:
+require them, or fail loudly.
+
+**Smaller items, all in `comment-bitbucket-pr.sh`:**
+
+- No size cap on the inlined patch. A quarantine diff is small, so this is
+  latent rather than active, but an oversized body means an HTTP 4xx, a
+  `catchError` FAILURE mark on an already-failed build, and no comment.
+- `python3`-or-`jq` duplication for one JSON object; the repo has both in
+  practice and the `jq` form is the simpler one. Worth collapsing since the file
+  is being touched for the wording change anyway.
+- `/tmp/bb-comment-response.json` is a fixed path, world-readable on a shared
+  agent, and never cleaned up — unlike every other temp file in these scripts,
+  which go through `mktemp` with a trap.
+- The Format/Lint branch of the comment body retires with the pivot, leaving the
+  `e2e-flake` wording as the only case.
+
+**One thing the pivot quietly improves:** with `publish.sh` and
+`open-bitbucket-pr.sh` gone, no credentialed step runs inside the CI container
+any more — both remaining publish paths are plain `sh` on the agent. The
+boundary becomes "container produces artifacts, agent publishes them," which is
+easier to state and to check than what exists today.
+
+### Actions
+
+- **E-1.** Get the token out of process arguments in both paths.
+- **E-2.** Apply mode comments as well as pushes, quoting the C-3 evidence and
+  stating plainly what isolation does and does not prove.
+- **E-3.** Move the loop-guard check after the fetch, against the fetched tip.
+- **E-4.** Fetch via the tokenized URL, or confirm `origin` is authenticated in
+  the post block.
+- **E-5.** Require `BITBUCKET_WORKSPACE` / `BITBUCKET_REPO_SLUG` instead of
+  defaulting them to a real repository.
+- **E-6.** Single JSON builder, `mktemp` for the response file, size cap on the
+  comment body, drop the Format/Lint wording branch.
+- **E-7.** Narrow the token to comment + push, dropping create-PR.
+- **E-8.** (A9) Comment when the system deliberately does nothing — an ambiguous
+  parse, a `fail` verdict, a refused quarantine — so silence always has a
+  stated reason.
+
+### Still open
+
+- **Should `apply` remain the intended end state?** It was defensible when the
+  patch was machine-verified. Now that every output is a judgement call, "always
+  comment, never push" is a coherent position, and the cost is one click per
+  flake. The counter-argument is that a comment nobody actions leaves the PR red
+  and trains people to ignore E2E failures. Worth deciding explicitly rather
+  than inheriting.
+- Whether E-8's no-op comments would be noise at the volume the real suite
+  produces. Needs a rough failure rate from the monorepo.
 
 ---
 
 ## Cross-cutting: the credential boundary
 
-**Status:** Not yet reviewed
+**Status:** Reviewed — holds, with one unenforced assumption
 
-The original design kept patch production credential-free and confined the
-token to a separate publish step. Post-pivot, review whether the boundary still
-holds: Phase E runs `push-e2e-quarantine.sh` directly on the Jenkins agent
-rather than inside the container, and Phases B–D no longer sit behind the
-`run.sh` entry point that made the separation obvious.
+The boundary survives the pivot and gets simpler: Phases B–D run with no token
+in the environment, Phase E is the only credentialed step, and post-pivot no
+credentialed step runs inside the container at all. Confirmed in the
+`Jenkinsfile`: the single `withCredentials` block for this path wraps only the
+publish `sh` step.
+
+The part that deserves attention is the direction of data flow rather than the
+placement of the credential. A test title is written by a PR author, scraped out
+of a log by Phase B, passed through Phase C and D, written into
+`e2e-quarantine.env`, and then **`source`d by a shell that holds the Bitbucket
+token** (`Jenkinsfile:300-303`). That is a PR-author-controlled string reaching a
+credentialed bash context. It is safe today, and specifically it is safe because
+every producer writes values with `printf %q` — `parse-e2e-failure.sh`,
+`isolate-e2e-failure.sh` and `tag-e2e-flaky.sh` all do, without exception.
+
+Nothing enforces that. It is a convention held in three scripts, and the failure
+mode if someone drops it is not a broken build but a shell injection into the
+one step that holds the token. By this repo's own stated principle that belongs
+in a check, which is rule 3 at the top of this document.
+
+Two ways to close it, both cheap:
+
+- A `validate-gates.sh` check that every emitted `.env` round-trips: write a
+  hostile title through the real producers (`$(id)`, backticks, `;`, newline,
+  quote) and assert the sourced value comes back byte-identical.
+- Stop shell-sourcing structured data. If Phase B moves to JSON, the consumers
+  can read it with `jq` and the whole class of concern disappears. This is a
+  second, independent argument for the `after:spec` direction.
+
+**Decision:** boundary confirmed sound; add the round-trip check, and prefer
+JSON-plus-`jq` over `source` wherever Phase B's rewrite makes it available.
+Keep the rule that the container never sees the token.
 
 ## Cross-cutting: the mechanical gates
 
-**Status:** Not yet reviewed
+**Status:** Reviewed — decisions recorded
 
-The principle — enforce in code, not in prose to a model — should survive.
-Post-pivot only `gate_e2e_quarantine_patch` remains, which makes it the single
-mechanical check in the entire system. Worth re-reading with that weight in
-mind: it is now load-bearing alone.
+Post-pivot, `gate_e2e_quarantine_patch` is the only mechanical check in the
+system. Read with that weight, it holds up better than expected:
+
+- The structural checks are right: rename, copy, add and delete file modes are
+  all rejected, exactly one path, and that path must equal the one the verdict
+  named and must be `*.cy.ts` / `*.cy.js`.
+- The line-level logic is a denylist (no `cy.`, `should(`, `expect(`, `import`,
+  `describe(`, `beforeEach(`, `afterEach(`, `it.skip`) *and* an allowlist (every
+  changed line must be an `it()` signature, a `tags:` line, or `@flaky`). The
+  allowlist is what makes it safe; the denylist alone would be porous. Verified
+  locally that a patch deleting a test body is rejected.
+- `must introduce @flaky` and `must not leave it.only` close the two obvious
+  abuses.
+
+Two gaps, both about bounding the output rather than blocking a category:
+
+- **No budget.** Three separate `it()` hunks in one file pass (verified
+  locally). Nothing today produces that, but the gate should not depend on that.
+- **The title is never checked.** Only the path is matched against the verdict,
+  so tagging a different test in the right file would pass the gate. The
+  tagger's exact-match-and-abort is the only thing preventing it.
+
+Two retirements worth stating so nobody "fixes" them: `DENY_GLOBS` /
+`gate_patch` have real holes — `package.json`, `project.json`, `.editorconfig`,
+`.eslintignore`, `prettier.config.*`, `jest.config.*`, `Jenkinsfile.*`,
+`bitbucket-pipelines.yml` and `ci-output.txt` are all accepted (verified
+locally, and a patch adding `ci-output.txt` as a new file passes `gate_patch`
+outright) — but every one of those is on the Format/Lint path and dies with it.
+**Do not spend effort there.** Likewise `is_bot_change`: the unknown-ref →
+treat-as-bot behaviour was correct, and it retires with the sibling-PR model.
+
+**Decision:** keep the gate's shape verbatim; add a one-test-per-patch budget
+and a title check; let the Format/Lint gate gaps retire with the code.
 
 ## Cross-cutting: the local test harness
 
-**Status:** Not yet reviewed
+**Status:** Reviewed — decisions recorded
 **Code:** `validate-gates.sh`
 
-82 checks today; 72 passing on `main`, 76 with PR #1 applied. The pivot deletes
-roughly half of them — stage eligibility, the path gate, `gate_patch`, the
-`run.sh` skip gates, the `open-bitbucket-pr.sh` guards, the `publish.sh` exec
-boundary, and the `is_bot_change` cases. The parse, isolate and quarantine
-sections all survive.
+82 checks today; 76 passing, 6 failing, reproduced locally on this box. All six
+are the Phase C isolation dry-run group and all report `result=error` for the
+reason in action C-1. The pivot deletes roughly half the suite — stage
+eligibility, the path gate, `gate_patch`, the `run.sh` skip gates, the
+`open-bitbucket-pr.sh` guards, the `publish.sh` exec boundary, and the
+`is_bot_change` cases. The parse, isolate and quarantine sections all survive.
 
-Two things to decide while it is being cut down:
+**Nothing runs this suite.** The `Jenkinsfile` never invokes it, so the only
+mechanical check in the system is itself unchecked, and the six known failures
+have no mechanism that would ever complain about a seventh. The script is
+already CI-shaped — no network, exits non-zero on failure — so wiring it in is
+a step, not a project.
 
-- The six permanently-failing isolation dry-run checks, which cannot pass
-  outside the monorepo because `isolate-e2e-failure.sh` has no `AUTOFIX_ROOT`
-  override. A suite with expected failures trains people to ignore it.
-- **A11** — there is still no end-to-end fixture run of
-  parse → isolate → tag → gate.
+**A useful accident worth recording:** the suite ran green (76/6) here under
+`mawk 1.3.4`, which is the dialect that caused the PR #1 bug, so the fix is
+confirmed against the awk that broke it rather than just against `gawk`.
+
+That also sharpens Phase B's open question. `parse-e2e-failure.sh` is invoked by
+a bare `sh` step in the post block, **not** inside
+`docker.image(...).inside` — unlike `isolate-e2e-failure.sh` and
+`tag-e2e-flaky.sh`, which are. So the `awk` and `grep` that decide whether
+parsing works are the **Jenkins agent's**, not the CI image's. The question to
+answer is which awk is on the `node_ui` agent; the image's awk is irrelevant to
+the parser and relevant only to the isolation script. Worth deciding, too,
+whether that split is deliberate — the parser needs no container, but running
+it outside means its toolchain is whatever the agent happens to have.
+
+**Decision:**
+
+- Make the suite green standalone via action C-1, then wire it into CI.
+- Run it under both `mawk` and `gawk` where both are available; the portability
+  class of bug is invisible under one dialect.
+- **A11** — add the end-to-end fixture run (parse → isolate → tag → gate) that
+  still does not exist. With `AUTOFIX_ROOT` and the dry-run reordering in place
+  this becomes possible without Cypress, and it is the check that would have
+  caught the PR #1 breakage as a chain failure rather than as one dead script.
 
 ---
 
+## What to do first
+
+Every phase has now been reviewed, so the useful output of this document is an
+order. Grouped by what each group buys, not by phase.
+
+**1. Stop the bleeding (independent of the redesign, hours not days).**
+`Jenkinsfile:167` so `@flaky` means "tolerated" rather than "deleted"; action
+C-1 so the harness can go green; then wire the harness into CI. None of these
+depend on any open question, and the first one is a correctness fix to behaviour
+that exists in production today.
+
+**2. Make the evidence honest before anyone enables `apply`.** Actions C-2, C-3
+and C-4, then E-2. This is the group that replaces what `verify_cmd` used to
+provide: a human reading the PR can see what was re-run, in which browser, how
+many tests matched, and what that does not prove. Until this exists, `apply`
+mode is a machine making an unexplained judgement call on someone else's branch.
+
+**3. Bound the decay.** The Phase D gate budget and title check, plus a decision
+on the un-quarantine mechanism. Cheapest sufficient version is option 3
+(refuse and escalate past a threshold).
+
+**4. Close the credential-boundary assumption.** The `%q` round-trip check. Small,
+and it converts the one remaining unenforced safety property into a gate.
+
+**5. Then the structural work.** The Phase B `after:spec` spike, which is the
+only item here that needs the real monorepo, and which subsumes several actions
+above (C-7, most of the Phase 0 capture question, and the `source`-versus-`jq`
+half of the credential boundary). Doing it before groups 1–4 would mean
+shipping the structural change on top of a system whose quarantine tag still
+silently deletes tests.
+
+Deliberately not on this list: everything on the Format/Lint path. The
+`DENY_GLOBS` holes, the `gate_patch` new-file hole, the `ci-output.txt` leak
+path, the sibling-PR branch-collision behaviour — all real, all retiring with
+the pivot. They are recorded in the sections above only so that nobody
+rediscovers them and treats them as work.
+
 ## Known loose ends
 
-- `testdata/e2e-failure.env.sample` still carries the pre-de-branding path
-  `src/e2e/alarm-central/local/alarms.cy.ts`; the branding pass missed it. It
-  is self-consistent with the dry-run assertions today, so changing it means
-  updating both.
+- ~~`testdata/e2e-failure.env.sample` still carries a pre-de-branding path.~~
+  Not true — checked on 2026-09-30. The sample reads
+  `src/e2e/module-a/local/products.cy.ts`, de-branded in `9365aa6`, which
+  predates this document; it matches the dry-run assertions. Nothing to do.
 - The `ENABLE_AI_AUTOFIX` parameter description in the `Jenkinsfile` says "On
   format/lint/unit/build failure" — wrong before the pivot, and now wrong in a
   second way. Fold into the renaming discussion above.
@@ -537,6 +934,11 @@ Two things to decide while it is being cut down:
   file sits at the root. Confirm the real location in the monorepo.
 - `README.md` documents Phases A–E as built and will need rewriting once the
   pivot lands.
+- `Jenkinsfile:167` — `params.SKIP_E2E_FLAKY_TESTS ?: true` makes the
+  `E2E Tests - Flaky` stage unrunnable regardless of the parameter. Not a loose
+  end so much as the blocking Phase D finding; listed here too because it is a
+  one-line fix that is independent of the redesign.
+- Nothing runs `validate-gates.sh` in CI. See the harness section.
 
 ## Decision log
 
@@ -547,3 +949,11 @@ Two things to decide while it is being cut down:
 | 2026-09-28 | 0     | Finding: the Format/Lint capture is never read — `run.sh` only tests that the file exists. Direction: drop the capture where unconsumed, delete the gate, relocate the E2E capture outside the repo root. |
 | 2026-09-28 | A     | Action list A1–A11 recorded, then superseded by the pivot. A9, A10, A11 carried over; the rest retired. |
 | 2026-09-28 | all   | **Pivot: drop Format/Lint autofix, E2E only.** Retires Phase A, deletes six files, halves `lib.sh` and the test suite, and removes the system's only mechanism for proving its own output correct. Review priority moves to Phase C. |
+| 2026-09-30 | D     | **Blocking finding: `@flaky` currently disables a test outright.** `Jenkinsfile:167` (`params.SKIP_E2E_FLAKY_TESTS ?: true`) makes the tolerant flaky stage unrunnable whichever way the parameter is set. Fix before `apply` mode is enabled for anyone. |
+| 2026-09-30 | C     | Isolation does not reproduce the failing run: `--browser=chromium` is hardcoded and `ci/nx-e2e-affected.sh` is bypassed. Confirm the real browser before trusting a `pass` verdict. |
+| 2026-09-30 | C     | The verdict must record evidence (matched count, browser, attempts, argv), not just an outcome — this is the replacement for the lost `verify_cmd` proof. N-of-M and spec-level-versus-grep re-run remain open. |
+| 2026-09-30 | D     | Keep the bespoke tagger; a TS AST is not worth a CI-image dependency for a signature edit. Add a one-test-per-patch budget and a title check to the gate. Un-quarantine mechanism open, not optional. |
+| 2026-09-30 | E     | Token must leave process arguments in both publish paths; `apply` must comment as well as push. Whether `apply` stays the intended end state is open now that no output is machine-verified. |
+| 2026-09-30 | x-cut | Credential boundary confirmed sound and simplified by the pivot (no credentialed step inside the container). Its one unenforced assumption — `printf %q` on every emitted value — becomes a `validate-gates.sh` round-trip check. |
+| 2026-09-30 | x-cut | Harness: 76/6 reproduced under `mawk 1.3.4`; the six failures are all action C-1. Make it green, run it under both awk dialects, wire it into CI, and add the A11 end-to-end fixture run. |
+| 2026-09-30 | B     | Correction: the parser runs on the Jenkins agent, not inside the CI image, so the agent's `awk`/`grep` are what matter. Replaces the original open question. |
