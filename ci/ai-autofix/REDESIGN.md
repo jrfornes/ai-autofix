@@ -887,13 +887,15 @@ it outside means its toolchain is whatever the agent happens to have.
 ## What to do first
 
 Every phase has now been reviewed, so the useful output of this document is an
-order. Grouped by what each group buys, not by phase.
+order. Grouped by what each group buys, not by phase. `PLAN.md` expands this
+into stages, and marks where the next step is a spike, an experiment, or a
+decision that has to wait for evidence.
 
-**1. Stop the bleeding (independent of the redesign, hours not days).**
-`Jenkinsfile:167` so `@flaky` means "tolerated" rather than "deleted"; action
-C-1 so the harness can go green; then wire the harness into CI. None of these
-depend on any open question, and the first one is a correctness fix to behaviour
-that exists in production today.
+**1. Stop the bleeding (one Groovy line and one script flag; no open
+questions).** `Jenkinsfile:167` so `@flaky` means "tolerated" rather than
+"deleted"; action C-1 so the harness can go green; then wire the harness into
+CI. None of these depend on any open question, and the first one is a
+correctness fix to behaviour that exists in production today.
 
 **2. Make the evidence honest before anyone enables `apply`.** Actions C-2, C-3
 and C-4, then E-2. This is the group that replaces what `verify_cmd` used to
