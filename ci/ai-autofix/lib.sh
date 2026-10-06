@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Shared helpers for the CI auto-fix agent.
-# Sourced by run.sh, agent-fix.sh, publish.sh and the *-bitbucket-pr.sh scripts.
+# Sourced by run.sh, agent-fix.sh, publish.sh, the *-bitbucket-pr.sh scripts and
+# the E2E chain (parse, isolate, tag, push).
 # Sourcing has no side effects beyond defining functions and config arrays.
 
 # ---------------------------------------------------------------------------
@@ -8,6 +9,16 @@
 # ---------------------------------------------------------------------------
 log() { echo "[ai-autofix] $*" >&2; }
 die() { log "FATAL: $*"; exit 1; }
+
+# ---------------------------------------------------------------------------
+# e2e layout
+# ---------------------------------------------------------------------------
+# The only place the monorepo layout is assumed: e2e projects live at
+# <E2E_PROJECTS_DIR>/<project>/, and E2E_SPEC is relative to the project
+# (what `nx run <project>:e2e --spec` takes).
+E2E_PROJECTS_DIR="apps"
+
+e2e_spec_path() { printf '%s/%s/%s\n' "$E2E_PROJECTS_DIR" "$1" "$2"; }
 
 # ---------------------------------------------------------------------------
 # stage configuration
@@ -70,8 +81,66 @@ is_bot_change() {
 }
 
 # True if HEAD was produced by Phase E e2e quarantine push.
+# Optional ref (default HEAD): publish checks the fetched tip, not the checkout.
 is_e2e_flake_head() {
-  git log -1 --pretty=%B 2>/dev/null | grep -qx 'Cursor-Autofix: e2e-flake'
+  git log -1 --pretty=%B "${1:-HEAD}" 2>/dev/null | grep -qx 'Cursor-Autofix: e2e-flake'
+}
+
+# ---------------------------------------------------------------------------
+# bitbucket (publish only)
+# ---------------------------------------------------------------------------
+# The token must never reach argv (readable by every user on the agent via ps)
+# or a remote URL (git echoes URLs on failure, into a public build log).
+
+# "<workspace>/<slug>" from BITBUCKET_WORKSPACE + BITBUCKET_REPO_SLUG, else from
+# origin's URL. No hardcoded default: a wrong one posts to another repository.
+bitbucket_repo() {
+  local ws="${BITBUCKET_WORKSPACE:-}" slug="${BITBUCKET_REPO_SLUG:-}" url
+  if [[ -n "$ws" && -n "$slug" ]]; then
+    printf '%s/%s\n' "$ws" "$slug"; return 0
+  fi
+  if [[ -n "$ws" || -n "$slug" ]]; then
+    log "set both BITBUCKET_WORKSPACE and BITBUCKET_REPO_SLUG, or neither"; return 1
+  fi
+  url="$(git remote get-url origin 2>/dev/null || true)"
+  if [[ "$url" =~ bitbucket\.org[:/]([^/]+)/([^/]+)/?$ ]]; then
+    printf '%s/%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]%.git}"; return 0
+  fi
+  log "cannot derive Bitbucket repo from origin '${url}'; set BITBUCKET_WORKSPACE and BITBUCKET_REPO_SLUG"
+  return 1
+}
+
+# Tokens are URL-safe; anything else would also break the curl config quoting.
+bitbucket_token_ok() {
+  [[ "${BITBUCKET_AUTOFIX_TOKEN:-}" =~ ^[A-Za-z0-9._~+/=-]+$ ]] \
+    || { log "BITBUCKET_AUTOFIX_TOKEN missing or has unexpected characters"; return 1; }
+}
+
+# git with the token as an Authorization header supplied via GIT_CONFIG_*
+# (git >= 2.31). Older git ignores those silently, so probe first.
+bitbucket_git() {
+  bitbucket_token_ok || return 1
+  if [[ "$(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=autofix.probe GIT_CONFIG_VALUE_0=ok \
+        git config --get autofix.probe 2>/dev/null)" != "ok" ]]; then
+    log "git $(git --version) ignores GIT_CONFIG_COUNT (needs >= 2.31); refusing to put the token in argv"
+    return 1
+  fi
+  local basic
+  basic="$(printf 'x-token-auth:%s' "$BITBUCKET_AUTOFIX_TOKEN" | base64 | tr -d '\n')"
+  GIT_CONFIG_COUNT=1 \
+  GIT_CONFIG_KEY_0="http.https://bitbucket.org/.extraHeader" \
+  GIT_CONFIG_VALUE_0="Authorization: Basic ${basic}" \
+  GIT_TERMINAL_PROMPT=0 \
+    git "$@"
+}
+
+# POST a JSON file; token goes to curl as a config on stdin. Prints HTTP code.
+bitbucket_api_post() {
+  local url="$1" json="$2" response="$3"
+  bitbucket_token_ok || return 1
+  printf 'header = "Authorization: Bearer %s"\n' "$BITBUCKET_AUTOFIX_TOKEN" \
+    | curl -sS -K - -o "$response" -w '%{http_code}' -X POST \
+        -H 'Content-Type: application/json' --data-binary @"$json" "$url"
 }
 
 # ---------------------------------------------------------------------------

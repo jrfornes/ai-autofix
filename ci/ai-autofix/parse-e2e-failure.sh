@@ -7,6 +7,11 @@ set -euo pipefail
 LOG="${1:-ci-output.txt}"
 OUT="${2:-e2e-failure.env}"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib.sh
+source "${SCRIPT_DIR}/lib.sh"
+APPS="/${E2E_PROJECTS_DIR}/"
+
 log() { echo "[parse-e2e-failure] $*" >&2; }
 
 die() {
@@ -31,13 +36,14 @@ normalize_spec() {
   local raw="$1" project="$2"
   raw="${raw#"${raw%%[![:space:]]*}"}"
   raw="${raw%"${raw##*[![:space:]]}"}"
-  # Absolute or repo path → strip through apps/<project>/
-  if [[ "$raw" == /* || "$raw" == *"/apps/"* ]]; then
-    if [[ -n "$project" && "$raw" == *"/apps/${project}/"* ]]; then
-      echo "${raw#*"/apps/${project}/"}"
+  # Absolute or repo path → strip through <projects dir>/<project>/
+  local rel_re="${APPS}[^/]+/(.+\.cy\.(ts|js))$"
+  if [[ "$raw" == /* || "$raw" == *"$APPS"* ]]; then
+    if [[ -n "$project" && "$raw" == *"${APPS}${project}/"* ]]; then
+      echo "${raw#*"${APPS}${project}/"}"
       return
     fi
-    if [[ "$raw" =~ /apps/[^/]+/(.+\.cy\.(ts|js))$ ]]; then
+    if [[ "$raw" =~ $rel_re ]]; then
       echo "${BASH_REMATCH[1]}"
       return
     fi
@@ -123,11 +129,13 @@ if [[ -z "$project" ]]; then
       || true
   )"
 fi
-# Derive from absolute/apps path if still empty.
+# Derive from absolute/<projects dir> path if still empty.
 if [[ -z "$project" ]]; then
-  if [[ "$spec_raw" =~ /apps/([^/]+)/ ]]; then
+  any_project_re="${APPS}([^/]+)/"
+  e2e_project_re="${APPS}([^/]+-e2e)/"
+  if [[ "$spec_raw" =~ $any_project_re ]]; then
     project="${BASH_REMATCH[1]}"
-  elif [[ "$head_part" =~ /apps/([^/]+-e2e)/ ]]; then
+  elif [[ "$head_part" =~ $e2e_project_re ]]; then
     project="${BASH_REMATCH[1]}"
   fi
 fi

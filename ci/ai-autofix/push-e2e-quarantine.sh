@@ -27,9 +27,9 @@ if [[ "$CHANGE_BRANCH" == "main" || "$CHANGE_BRANCH" == "master" ]]; then
   die "refusing push destination ${CHANGE_BRANCH}"
 fi
 
-TOKEN="${BITBUCKET_AUTOFIX_TOKEN:?token required}"
-WORKSPACE="${BITBUCKET_WORKSPACE:-workassureonline}"
-SLUG="${BITBUCKET_REPO_SLUG:-acme-ui}"
+bitbucket_token_ok || die "token required"
+REPO="$(bitbucket_repo)" || die "Bitbucket repository unknown"
+REMOTE_URL="${BITBUCKET_GIT_URL:-https://bitbucket.org/${REPO}.git}"
 BUILD_URL="${BUILD_URL:-}"
 TITLE="${E2E_TITLE:-unknown}"
 
@@ -39,19 +39,22 @@ EXPECTED="${PATHS[0]}"
 
 gate_e2e_quarantine_patch "$PATCH" "$EXPECTED" || die "quarantine gate rejected patch at publish"
 
-if is_e2e_flake_head; then
-  log "HEAD already has Cursor-Autofix: e2e-flake; skipping push (loop guard)"
-  exit 0
-fi
-
 BASE_SHA="$(git rev-parse HEAD)"
 restore_head() {
   git switch --detach "$BASE_SHA" 2>/dev/null || git checkout -q "$BASE_SHA"
 }
 trap restore_head EXIT
 
-git fetch origin "${CHANGE_BRANCH}" || die "fetch origin/${CHANGE_BRANCH} failed"
-TIP="$(git rev-parse "origin/${CHANGE_BRANCH}")"
+# Same authenticated URL as the push: post-block `origin` may have no credentials.
+bitbucket_git fetch -q "$REMOTE_URL" "refs/heads/${CHANGE_BRANCH}" \
+  || die "fetch ${CHANGE_BRANCH} from ${REMOTE_URL} failed"
+TIP="$(git rev-parse FETCH_HEAD)"
+
+if is_e2e_flake_head "$TIP"; then
+  log "${CHANGE_BRANCH} tip ${TIP} already has Cursor-Autofix: e2e-flake; skipping push (loop guard)"
+  exit 0
+fi
+
 git switch --detach "$TIP" 2>/dev/null || git checkout -q "$TIP"
 
 git apply --check "$PATCH" || die "patch no longer applies on origin/${CHANGE_BRANCH} (${TIP})"
@@ -73,8 +76,7 @@ Do not auto-merge implications: already on the feature branch.
 
 Cursor-Autofix: e2e-flake"
 
-REMOTE_URL="https://x-token-auth:${TOKEN}@bitbucket.org/${WORKSPACE}/${SLUG}.git"
-if ! git push "${REMOTE_URL}" "HEAD:refs/heads/${CHANGE_BRANCH}"; then
+if ! bitbucket_git push "${REMOTE_URL}" "HEAD:refs/heads/${CHANGE_BRANCH}"; then
   die "push to ${CHANGE_BRANCH} failed (non-fast-forward or auth); not force-pushing"
 fi
 

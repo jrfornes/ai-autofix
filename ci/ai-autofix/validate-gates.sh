@@ -171,6 +171,114 @@ check bash -c "grep -q 'quarantine as' '${SCRIPT_DIR}/comment-bitbucket-pr.sh'"
 T="is_bot_change body has no [cursor-autofix] substring match";
 check bash -c "! awk '/^is_bot_change\\(\\)/,/^}/' '${SCRIPT_DIR}/lib.sh' | grep -q '\\[cursor-autofix\\]'"
 
+echo "== bitbucket repo + token handling (E-1, E-5) =="
+bb_repo_in() {  # ORIGIN_URL [VAR=VALUE...] → bitbucket_repo output from a repo with that origin
+  local url="$1"; shift
+  local r; r="$(mktemp -d)"
+  git -C "$r" init -q && git -C "$r" remote add origin "$url"
+  (cd "$r" && env BITBUCKET_WORKSPACE= BITBUCKET_REPO_SLUG= "$@" \
+    bash -c "source '${SCRIPT_DIR}/lib.sh'; bitbucket_repo" 2>/dev/null)
+  local st=$?; rm -rf "$r"; return "$st"
+}
+T="repo from https origin";  check test "$(bb_repo_in https://bitbucket.org/ws1/slug1.git)" = ws1/slug1
+T="repo from ssh origin";    check test "$(bb_repo_in git@bitbucket.org:ws2/slug2.git)" = ws2/slug2
+T="explicit repo wins";      check test "$(bb_repo_in https://bitbucket.org/a/b.git BITBUCKET_WORKSPACE=x BITBUCKET_REPO_SLUG=y)" = x/y
+T="non-bitbucket origin fails loudly"; check not bb_repo_in https://github.com/a/b.git
+T="half-set repo vars fail";           check not bb_repo_in https://bitbucket.org/a/b.git BITBUCKET_WORKSPACE=x
+T="token with quote rejected"
+check not env BITBUCKET_AUTOFIX_TOKEN='abc"def' bash -c "source '${SCRIPT_DIR}/lib.sh'; bitbucket_token_ok 2>/dev/null"
+
+SECRET="SeCrEt-token_123"
+SHIM_BIN="$(mktemp -d)"; ARGV_LOG="$(mktemp)"; CURL_STDIN="$(mktemp)"; CURL_DATA="$(mktemp)"
+REAL_GIT="$(command -v git)"
+cat >"${SHIM_BIN}/curl" <<EOF
+#!/usr/bin/env bash
+printf 'curl %s\n' "\$*" >>"${ARGV_LOG}"
+cat >"${CURL_STDIN}"
+out=""; prev=""
+for a in "\$@"; do
+  [[ "\$prev" == "-o" ]] && out="\$a"
+  [[ "\$prev" == "--data-binary" ]] && cp "\${a#@}" "${CURL_DATA}"
+  prev="\$a"
+done
+[[ -n "\$out" ]] && echo '{"error":"fake"}' >"\$out"
+printf '%s' "\${FAKE_HTTP_CODE:-201}"
+EOF
+cat >"${SHIM_BIN}/git" <<EOF
+#!/usr/bin/env bash
+printf 'git %s\n' "\$*" >>"${ARGV_LOG}"
+exec "${REAL_GIT}" "\$@"
+EOF
+chmod +x "${SHIM_BIN}/curl" "${SHIM_BIN}/git"
+
+COMMENT_PATCH="$(mktemp)"
+printf 'diff --git a/x.cy.ts b/x.cy.ts\n+  it(%s, { tags: [%s] }, () => {\n' "'t'" "'@flaky'" >"$COMMENT_PATCH"
+comment_run() {
+  : >"$ARGV_LOG"
+  run_clean PATH="${SHIM_BIN}:${PATH}" BITBUCKET_AUTOFIX_TOKEN="$SECRET" CHANGE_ID=7 \
+    BITBUCKET_WORKSPACE=ws BITBUCKET_REPO_SLUG=slug FAILED_STAGE="E2E Tests" AUTOFIX_SOURCE=e2e-flake \
+    E2E_PROJECT=p-e2e E2E_SPEC=src/e2e/x.cy.ts E2E_TITLE=t \
+    ISOLATION_BROWSER=chromium ISOLATION_MATCHED=1 ISOLATION_ATTEMPTS=1 \
+    "$@" "${SCRIPT_DIR}/comment-bitbucket-pr.sh" "$COMMENT_PATCH"
+}
+assert_exit "comment posts (fake curl 201)" 0 comment_run
+T="comment: token not in curl argv";  check not grep -qF "$SECRET" "$ARGV_LOG"
+T="comment: token reaches curl via stdin config"; check grep -qF "Authorization: Bearer ${SECRET}" "$CURL_STDIN"
+T="comment: posts to the PR comments endpoint"
+check grep -qF "https://api.bitbucket.org/2.0/repositories/ws/slug/pullrequests/7/comments" "$ARGV_LOG"
+T="comment: body inlines diff and quotes evidence"
+check bash -c "jq -er .content.raw '$CURL_DATA' | grep -qF '\`\`\`diff' && jq -er .content.raw '$CURL_DATA' | grep -qF -- '- Tests executed: 1' && jq -er .content.raw '$CURL_DATA' | grep -qF 'not a proof'"
+comment_run MAX_PATCH_BYTES=10 >/dev/null 2>&1
+T="comment: oversized patch is referenced, not inlined"
+check bash -c "jq -er .content.raw '$CURL_DATA' | grep -qF 'too large to inline' && ! jq -er .content.raw '$CURL_DATA' | grep -qF '\`\`\`diff'"
+assert_exit "comment: HTTP 400 exits 1" 1 comment_run FAKE_HTTP_CODE=400
+T="comment: response file is not a fixed /tmp path"
+check not grep -qF "/tmp/bb-comment-response.json" "${SCRIPT_DIR}/comment-bitbucket-pr.sh"
+rm -f "$COMMENT_PATCH"
+
+echo "== push-e2e-quarantine against a local remote (E-1, E-3, E-4) =="
+PUSH_TMP="$(mktemp -d)"
+(
+  set -e
+  cd "$PUSH_TMP"
+  git init -q --bare remote.git
+  git init -q seed && cd seed
+  git config user.email t@t; git config user.name t
+  mkdir -p apps/fixture-e2e/src/e2e
+  cp "${TD:-${SCRIPT_DIR}/testdata}/quarantine/no-options.cy.ts" apps/fixture-e2e/src/e2e/sample.cy.ts
+  git add -A && git commit -qm init
+  git push -q ../remote.git HEAD:refs/heads/feature/x
+  git -C ../remote.git symbolic-ref HEAD refs/heads/feature/x
+  cd .. && git clone -q remote.git work && cd work
+  git checkout -q --detach origin/feature/x
+  node "${SCRIPT_DIR}/tag-e2e-flaky.mjs" apps/fixture-e2e/src/e2e/sample.cy.ts "no options title" 2>/dev/null
+  git diff >../quarantine.patch
+  git checkout -q -- apps/fixture-e2e/src/e2e/sample.cy.ts
+  git remote set-url origin https://bitbucket.org/ws/slug.git
+)
+push_run() {
+  : >"$ARGV_LOG"
+  (cd "$PUSH_TMP/work" && run_clean PATH="${SHIM_BIN}:${PATH}" BITBUCKET_AUTOFIX_TOKEN="$SECRET" \
+    BITBUCKET_GIT_URL="file://${PUSH_TMP}/remote.git" CHANGE_BRANCH=feature/x E2E_TITLE="no options title" \
+    AUTOFIX_PATHS=apps/fixture-e2e/src/e2e/sample.cy.ts \
+    "${SCRIPT_DIR}/push-e2e-quarantine.sh" "$PUSH_TMP/quarantine.patch")
+}
+remote_tip() { git -C "$PUSH_TMP/remote.git" rev-parse refs/heads/feature/x; }
+tip_before="$(remote_tip)"
+assert_exit "push: quarantine commit lands on the branch" 0 push_run
+tip_after="$(remote_tip)"
+T="push: remote tip moved and carries the e2e-flake trailer"
+check bash -c "[[ '$tip_before' != '$tip_after' ]] && git -C '$PUSH_TMP/remote.git' log -1 --pretty=%B feature/x | grep -qx 'Cursor-Autofix: e2e-flake'"
+T="push: token never in git argv"; check not grep -qF "$SECRET" "$ARGV_LOG"
+T="push: fetched from the push URL, not origin"
+check bash -c "grep -q '^git fetch -q file://' '$ARGV_LOG' && ! grep -q '^git fetch origin' '$ARGV_LOG'"
+T="push: local HEAD restored and has no trailer"
+check not bash -c "cd '$PUSH_TMP/work' && source '${SCRIPT_DIR}/lib.sh' && is_e2e_flake_head"
+assert_exit "push: second run exits 0" 0 push_run
+T="push: loop guard reads the fetched tip, not local HEAD"
+check bash -c "[[ '$(remote_tip)' == '$tip_after' ]] && grep -q 'already has Cursor-Autofix' /tmp/av.out"
+rm -rf "$PUSH_TMP" "$SHIM_BIN"; rm -f "$ARGV_LOG" "$CURL_STDIN" "$CURL_DATA"
+
 echo "== publish.sh exports sourced artifact env (exec boundary) =="
 PUB_META="$(mktemp)"; PUB_CHILD="$(mktemp)"
 cat >"$PUB_META" <<'EOF'
@@ -376,6 +484,66 @@ else
 fi
 rm -f "$ISO_OUT"
 
+# --- verdict from a real (faked) run: npx on PATH replays a Cypress log ---
+FAKE_BIN="$(mktemp -d)"
+cat >"${FAKE_BIN}/npx" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >"${FAKE_NPX_ARGV:-/dev/null}"
+[[ -n "${FAKE_NPX_LOG:-}" ]] && cat "$FAKE_NPX_LOG"
+exit "${FAKE_NPX_EXIT:-0}"
+EOF
+chmod +x "${FAKE_BIN}/npx"
+
+# cypress_box TESTS PASSING FAILING PENDING — the per-spec (Results) table.
+cypress_box() {
+  printf '  │ Tests:        %s │\n  │ Passing:      %s │\n  │ Failing:      %s │\n  │ Pending:      %s │\n  │ Skipped:      0 │\n' "$@"
+}
+
+ISO_ROOT="$(mktemp -d)"
+mkdir -p "$ISO_ROOT/apps/acme-app-e2e/src/e2e/module-a/local"
+touch "$ISO_ROOT/apps/acme-app-e2e/src/e2e/module-a/local/products.cy.ts"
+FAKE_LOG="$(mktemp)"
+
+# isolate_case NAME EXIT WANT_RESULT WANT_MATCHED BOX_ARGS...  (no box args → no results table)
+isolate_case() {
+  local name="$1" fexit="$2" want="$3" want_matched="$4"; shift 4
+  if [[ "$#" -gt 0 ]]; then cypress_box "$@" >"$FAKE_LOG"; else echo "webpack compile error" >"$FAKE_LOG"; fi
+  rm -f "$ISO_OUT"
+  env PATH="${FAKE_BIN}:${PATH}" AUTOFIX_ROOT="$ISO_ROOT" FAKE_NPX_LOG="$FAKE_LOG" FAKE_NPX_EXIT="$fexit" \
+    "$ISO" "$SAMPLE" "$ISO_OUT" >/dev/null 2>&1 || true
+  T="isolate verdict: ${name}"
+  # shellcheck disable=SC1090
+  if [[ -f "$ISO_OUT" ]] && set -a && source "$ISO_OUT" && set +a \
+    && [[ "$ISOLATION_RESULT" == "$want" && "$ISOLATION_MATCHED" == "$want_matched" ]]; then
+    ok "$T"
+  else
+    bad "$T (want ${want}/${want_matched})"; cat "$ISO_OUT" 2>/dev/null || true
+  fi
+  unset ISOLATION_RESULT ISOLATION_MATCHED
+}
+isolate_case "one test passed → pass"               0   pass        1  1 1 0 0
+isolate_case "one test failed → fail"               1   fail        1  1 0 1 0
+isolate_case "filtered tests pending, none ran"     0   no_match    0  4 0 0 4
+isolate_case "grep hit two tests → multi_match"     0   multi_match 2  2 2 0 0
+isolate_case "no results table → no_match"          1   no_match    ""
+isolate_case "timeout → error"                      124 error       ""
+
+isolate_case "evidence run" 0 pass 1 3 1 0 2 >/dev/null
+T="pass verdict records evidence (browser, counts, duration, argv)"
+# shellcheck disable=SC1090
+if set -a && source "$ISO_OUT" && set +a \
+  && [[ "$ISOLATION_BROWSER" == "chromium" && "$ISOLATION_PASSING" == "1" \
+     && "$ISOLATION_FAILING" == "0" && "$ISOLATION_PENDING" == "2" \
+     && "$ISOLATION_DURATION_S" =~ ^[0-9]+$ \
+     && "$ISOLATION_ARGV" == "npx nx run acme-app-e2e:e2e --browser=chromium "* ]]; then
+  ok "$T"
+else
+  bad "$T"; cat "$ISO_OUT"
+fi
+rm -rf "$ISO_ROOT" "$FAKE_LOG"
+rm -f "$ISO_OUT"
+unset E2E_PROJECT E2E_SPEC E2E_TITLE "${!ISOLATION_@}" 2>/dev/null || true
+
 echo "== tag-e2e-flaky + gate_e2e_quarantine_patch =="
 TAG_SH="${SCRIPT_DIR}/tag-e2e-flaky.sh"
 TAG_MJS="${SCRIPT_DIR}/tag-e2e-flaky.mjs"
@@ -512,6 +680,82 @@ else bad "$T"; (cd "$wrap_root" && git status --porcelain); fi
 rm -rf "$edit_tmp" "$wrap_root"
 rm -f "$ISO_PASS" "$ISO_FAIL"
 unset E2E_PROJECT E2E_SPEC E2E_TITLE ISOLATION_RESULT AUTOFIX_SOURCE AUTOFIX_PATHS FAILED_STAGE 2>/dev/null || true
+
+# Every .env in the chain is later sourced by the shell holding the Bitbucket
+# token, so a PR-authored title must survive each producer byte-for-byte.
+echo "== chain: parse → isolate → tag → gate, hostile title =="
+HOSTILE_TITLE="$(cat <<'EOF'
+it's "q" $(touch PWNED) `touch PWNED2` ; $HOME \ end
+EOF
+)"
+chain_root="$(mktemp -d)"; SANDBOX="$(mktemp -d)"
+CHAIN_SPEC_REL="src/e2e/hostile.cy.ts"
+CHAIN_SPEC="apps/hostile-e2e/${CHAIN_SPEC_REL}"
+mkdir -p "$chain_root/apps/hostile-e2e/src/e2e"
+cat >"$chain_root/$CHAIN_SPEC" <<'EOF'
+describe('Hostile', () => {
+  it("it's \"q\" $(touch PWNED) `touch PWNED2` ; $HOME \\ end", () => {
+    cy.get('body').should('exist');
+  });
+});
+EOF
+(cd "$chain_root" && git init -q && git add -A && git -c user.email=t@t -c user.name=t commit -qm init)
+CHAIN_LOG="$(mktemp)"
+cat >"$CHAIN_LOG" <<EOF
+> nx run hostile-e2e:e2e --browser=chromium --env.grepTags=-@flaky
+
+  Running:  ${CHAIN_SPEC_REL}                          (1 of 1)
+
+  Spec Ran:     ${CHAIN_SPEC_REL}
+
+  1 failing
+
+  1) Hostile
+       ${HOSTILE_TITLE}:
+     AssertionError: boom
+
+Failed tasks:
+
+- hostile-e2e:e2e
+EOF
+
+sourced_title() {  # E2E_TITLE as the publish shell would see it, sourced in a sandbox
+  ( cd "$SANDBOX" && unset E2E_TITLE && set -a && source "$1" && set +a && printf '%s' "$E2E_TITLE" )
+}
+round_trip() {
+  T="round-trip: $1 title is byte-identical"
+  if [[ -f "$2" && "$(sourced_title "$2")" == "$HOSTILE_TITLE" ]]; then ok "$T"
+  else bad "$T"; cat "$2" 2>/dev/null; fi
+}
+
+assert_exit "chain: parse" 0 "$PARSE" "$CHAIN_LOG" "$chain_root/e2e-failure.env"
+round_trip "e2e-failure.env" "$chain_root/e2e-failure.env"
+
+cypress_box 1 1 0 0 >"$FAKE_LOG"
+FAKE_ARGV="$(mktemp)"
+assert_exit "chain: isolate" 0 \
+  env PATH="${FAKE_BIN}:${PATH}" AUTOFIX_ROOT="$chain_root" FAKE_NPX_LOG="$FAKE_LOG" FAKE_NPX_ARGV="$FAKE_ARGV" \
+  "$ISO" e2e-failure.env e2e-isolation.env
+round_trip "e2e-isolation.env" "$chain_root/e2e-isolation.env"
+T="chain: isolate ran the parsed spec with a metachar-escaped grep"
+if grep -qx -- "--spec=${CHAIN_SPEC_REL}" "$FAKE_ARGV" && grep -qF -- '\$\(touch PWNED\)' "$FAKE_ARGV"; then ok "$T"
+else bad "$T"; cat "$FAKE_ARGV"; fi
+
+assert_exit "chain: tag" 0 \
+  env AUTOFIX_ROOT="$chain_root" "$TAG_SH" e2e-isolation.env e2e-quarantine.patch e2e-quarantine.env
+round_trip "e2e-quarantine.env" "$chain_root/e2e-quarantine.env"
+T="chain: quarantine patch clears the gate"
+if [[ -s "$chain_root/e2e-quarantine.patch" ]] \
+  && gate_e2e_quarantine_patch "$chain_root/e2e-quarantine.patch" "$CHAIN_SPEC"; then ok "$T"
+else bad "$T"; cat "$chain_root/e2e-quarantine.patch" 2>/dev/null; fi
+
+T="chain: nothing in the title was executed"
+if ! compgen -G "$SANDBOX/PWNED*" >/dev/null && ! compgen -G "$chain_root/PWNED*" >/dev/null \
+  && ! compgen -G "./PWNED*" >/dev/null; then ok "$T"
+else bad "$T"; ls "$SANDBOX" "$chain_root"; fi
+
+rm -rf "$chain_root" "$SANDBOX" "$FAKE_BIN"
+rm -f "$CHAIN_LOG" "$FAKE_LOG" "$FAKE_ARGV"
 
 echo
 echo "Results: ${PASS} passed, ${FAIL} failed"
