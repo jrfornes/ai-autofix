@@ -236,7 +236,48 @@ T="comment: response file is not a fixed /tmp path"
 check not grep -qF "/tmp/bb-comment-response.json" "${SCRIPT_DIR}/comment-bitbucket-pr.sh"
 rm -f "$COMMENT_PATCH"
 
-rm -rf "$SHIM_BIN"; rm -f "$ARGV_LOG" "$CURL_STDIN" "$CURL_DATA"
+echo "== push-e2e-quarantine against a local remote (E-1, E-3, E-4) =="
+PUSH_TMP="$(mktemp -d)"
+(
+  set -e
+  cd "$PUSH_TMP"
+  git init -q --bare remote.git
+  git init -q seed && cd seed
+  git config user.email t@t; git config user.name t
+  mkdir -p apps/fixture-e2e/src/e2e
+  cp "${TD:-${SCRIPT_DIR}/testdata}/quarantine/no-options.cy.ts" apps/fixture-e2e/src/e2e/sample.cy.ts
+  git add -A && git commit -qm init
+  git push -q ../remote.git HEAD:refs/heads/feature/x
+  git -C ../remote.git symbolic-ref HEAD refs/heads/feature/x
+  cd .. && git clone -q remote.git work && cd work
+  git checkout -q --detach origin/feature/x
+  node "${SCRIPT_DIR}/tag-e2e-flaky.mjs" apps/fixture-e2e/src/e2e/sample.cy.ts "no options title" 2>/dev/null
+  git diff >../quarantine.patch
+  git checkout -q -- apps/fixture-e2e/src/e2e/sample.cy.ts
+  git remote set-url origin https://bitbucket.org/ws/slug.git
+)
+push_run() {
+  : >"$ARGV_LOG"
+  (cd "$PUSH_TMP/work" && run_clean PATH="${SHIM_BIN}:${PATH}" BITBUCKET_AUTOFIX_TOKEN="$SECRET" \
+    BITBUCKET_GIT_URL="file://${PUSH_TMP}/remote.git" CHANGE_BRANCH=feature/x E2E_TITLE="no options title" \
+    AUTOFIX_PATHS=apps/fixture-e2e/src/e2e/sample.cy.ts \
+    "${SCRIPT_DIR}/push-e2e-quarantine.sh" "$PUSH_TMP/quarantine.patch")
+}
+remote_tip() { git -C "$PUSH_TMP/remote.git" rev-parse refs/heads/feature/x; }
+tip_before="$(remote_tip)"
+assert_exit "push: quarantine commit lands on the branch" 0 push_run
+tip_after="$(remote_tip)"
+T="push: remote tip moved and carries the e2e-flake trailer"
+check bash -c "[[ '$tip_before' != '$tip_after' ]] && git -C '$PUSH_TMP/remote.git' log -1 --pretty=%B feature/x | grep -qx 'Cursor-Autofix: e2e-flake'"
+T="push: token never in git argv"; check not grep -qF "$SECRET" "$ARGV_LOG"
+T="push: fetched from the push URL, not origin"
+check bash -c "grep -q '^git fetch -q file://' '$ARGV_LOG' && ! grep -q '^git fetch origin' '$ARGV_LOG'"
+T="push: local HEAD restored and has no trailer"
+check not bash -c "cd '$PUSH_TMP/work' && source '${SCRIPT_DIR}/lib.sh' && is_e2e_flake_head"
+assert_exit "push: second run exits 0" 0 push_run
+T="push: loop guard reads the fetched tip, not local HEAD"
+check bash -c "[[ '$(remote_tip)' == '$tip_after' ]] && grep -q 'already has Cursor-Autofix' /tmp/av.out"
+rm -rf "$PUSH_TMP" "$SHIM_BIN"; rm -f "$ARGV_LOG" "$CURL_STDIN" "$CURL_DATA"
 
 echo "== publish.sh exports sourced artifact env (exec boundary) =="
 PUB_META="$(mktemp)"; PUB_CHILD="$(mktemp)"
