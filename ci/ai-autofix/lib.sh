@@ -105,13 +105,17 @@ is_denied_path() {
 }
 
 # Print every file a patch touches (both sides of each diff header), deduped.
+# Pure bash: push-e2e-quarantine.sh calls this on the Jenkins agent, whose awk
+# is not the pinned one in the CI image.
 patch_paths() {
-  awk '
-    /^diff --git /{
-      a=$3; b=$4; sub(/^a\//,"",a); sub(/^b\//,"",b);
-      if (a != "") print a;
-      if (b != "") print b;
-    }' "$1" | sort -u
+  local line a b _
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" == "diff --git "* ]] || continue
+    read -r _ _ a b _ <<<"$line"
+    a="${a#a/}"; b="${b#b/}"
+    if [[ -n "$a" ]]; then printf '%s\n' "$a"; fi
+    if [[ -n "$b" ]]; then printf '%s\n' "$b"; fi
+  done <"$1" | sort -u
 }
 
 # Reject a patch that renames/copies files or touches any protected path.

@@ -80,7 +80,16 @@ T="gate rejects config patch";       check not gate_patch "$BADP"
 T="gate rejects rename patch";        check not gate_patch "$REN"
 T="patch_paths extracts file"
 if patch_paths "$GOOD" | grep -qx apps/foo/src/app.ts; then ok "$T"; else bad "$T"; fi
-rm -f "$GOOD" "$BADP" "$REN"
+T="patch_paths: both rename sides, ignores indented/added headers, no final newline"
+PP="$(mktemp)"
+printf '%s\n' \
+  'diff --git a/apps/foo/src/a.ts b/apps/foo/src/b.ts' \
+  ' diff --git a/context/line b/context/line' \
+  '+diff --git a/added/line b/added/line' >"$PP"
+printf '%s' 'diff --git a/b/odd.ts b/b/odd.ts' >>"$PP"
+if [[ "$(patch_paths "$PP" | paste -sd, -)" == "apps/foo/src/a.ts,apps/foo/src/b.ts,b/odd.ts" ]]; then ok "$T"
+else bad "$T"; patch_paths "$PP"; fi
+rm -f "$GOOD" "$BADP" "$REN" "$PP"
 
 echo "== loop guard (needs a repo) =="
 TMPREPO="$(mktemp -d)"
