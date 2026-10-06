@@ -573,6 +573,82 @@ rm -rf "$edit_tmp" "$wrap_root"
 rm -f "$ISO_PASS" "$ISO_FAIL"
 unset E2E_PROJECT E2E_SPEC E2E_TITLE ISOLATION_RESULT AUTOFIX_SOURCE AUTOFIX_PATHS FAILED_STAGE 2>/dev/null || true
 
+# Every .env in the chain is later sourced by the shell holding the Bitbucket
+# token, so a PR-authored title must survive each producer byte-for-byte.
+echo "== chain: parse → isolate → tag → gate, hostile title =="
+HOSTILE_TITLE="$(cat <<'EOF'
+it's "q" $(touch PWNED) `touch PWNED2` ; $HOME \ end
+EOF
+)"
+chain_root="$(mktemp -d)"; SANDBOX="$(mktemp -d)"
+CHAIN_SPEC_REL="src/e2e/hostile.cy.ts"
+CHAIN_SPEC="apps/hostile-e2e/${CHAIN_SPEC_REL}"
+mkdir -p "$chain_root/apps/hostile-e2e/src/e2e"
+cat >"$chain_root/$CHAIN_SPEC" <<'EOF'
+describe('Hostile', () => {
+  it("it's \"q\" $(touch PWNED) `touch PWNED2` ; $HOME \\ end", () => {
+    cy.get('body').should('exist');
+  });
+});
+EOF
+(cd "$chain_root" && git init -q && git add -A && git -c user.email=t@t -c user.name=t commit -qm init)
+CHAIN_LOG="$(mktemp)"
+cat >"$CHAIN_LOG" <<EOF
+> nx run hostile-e2e:e2e --browser=chromium --env.grepTags=-@flaky
+
+  Running:  ${CHAIN_SPEC_REL}                          (1 of 1)
+
+  Spec Ran:     ${CHAIN_SPEC_REL}
+
+  1 failing
+
+  1) Hostile
+       ${HOSTILE_TITLE}:
+     AssertionError: boom
+
+Failed tasks:
+
+- hostile-e2e:e2e
+EOF
+
+sourced_title() {  # E2E_TITLE as the publish shell would see it, sourced in a sandbox
+  ( cd "$SANDBOX" && unset E2E_TITLE && set -a && source "$1" && set +a && printf '%s' "$E2E_TITLE" )
+}
+round_trip() {
+  T="round-trip: $1 title is byte-identical"
+  if [[ -f "$2" && "$(sourced_title "$2")" == "$HOSTILE_TITLE" ]]; then ok "$T"
+  else bad "$T"; cat "$2" 2>/dev/null; fi
+}
+
+assert_exit "chain: parse" 0 "$PARSE" "$CHAIN_LOG" "$chain_root/e2e-failure.env"
+round_trip "e2e-failure.env" "$chain_root/e2e-failure.env"
+
+cypress_box 1 1 0 0 >"$FAKE_LOG"
+FAKE_ARGV="$(mktemp)"
+assert_exit "chain: isolate" 0 \
+  env PATH="${FAKE_BIN}:${PATH}" AUTOFIX_ROOT="$chain_root" FAKE_NPX_LOG="$FAKE_LOG" FAKE_NPX_ARGV="$FAKE_ARGV" \
+  "$ISO" e2e-failure.env e2e-isolation.env
+round_trip "e2e-isolation.env" "$chain_root/e2e-isolation.env"
+T="chain: isolate ran the parsed spec with a metachar-escaped grep"
+if grep -qx -- "--spec=${CHAIN_SPEC_REL}" "$FAKE_ARGV" && grep -qF -- '\$\(touch PWNED\)' "$FAKE_ARGV"; then ok "$T"
+else bad "$T"; cat "$FAKE_ARGV"; fi
+
+assert_exit "chain: tag" 0 \
+  env AUTOFIX_ROOT="$chain_root" "$TAG_SH" e2e-isolation.env e2e-quarantine.patch e2e-quarantine.env
+round_trip "e2e-quarantine.env" "$chain_root/e2e-quarantine.env"
+T="chain: quarantine patch clears the gate"
+if [[ -s "$chain_root/e2e-quarantine.patch" ]] \
+  && gate_e2e_quarantine_patch "$chain_root/e2e-quarantine.patch" "$CHAIN_SPEC"; then ok "$T"
+else bad "$T"; cat "$chain_root/e2e-quarantine.patch" 2>/dev/null; fi
+
+T="chain: nothing in the title was executed"
+if ! compgen -G "$SANDBOX/PWNED*" >/dev/null && ! compgen -G "$chain_root/PWNED*" >/dev/null \
+  && ! compgen -G "./PWNED*" >/dev/null; then ok "$T"
+else bad "$T"; ls "$SANDBOX" "$chain_root"; fi
+
+rm -rf "$chain_root" "$SANDBOX" "$FAKE_BIN"
+rm -f "$CHAIN_LOG" "$FAKE_LOG" "$FAKE_ARGV"
+
 echo
 echo "Results: ${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]
