@@ -9,6 +9,9 @@ RUN="${SCRIPT_DIR}/run.sh"
 # shellcheck source=lib.sh
 source "${SCRIPT_DIR}/lib.sh"
 
+# Results only hold for this awk; parse-e2e-failure.sh is its sole runtime user.
+echo "awk: $(command -v awk || echo none) — $({ awk -W version || awk --version; } </dev/null 2>&1 | head -n1)"
+
 PASS=0; FAIL=0
 ok()   { echo "PASS: $1"; PASS=$((PASS+1)); }
 bad()  { echo "FAIL: $1"; FAIL=$((FAIL+1)); }

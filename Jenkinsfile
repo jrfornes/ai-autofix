@@ -92,7 +92,7 @@ pipeline {
             steps {
                 script {
                     docker.image(env.DOCKER_IMAGE).inside('--privileged --ipc=host') {
-                        sh './ci/ai-autofix/validate-gates-all-awk.sh'
+                        sh './ci/ai-autofix/validate-gates.sh'
                     }
                 }
             }
