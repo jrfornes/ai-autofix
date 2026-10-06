@@ -45,7 +45,7 @@ if [[ -z "${E2E_PROJECT:-}" || -z "${E2E_SPEC:-}" || -z "${E2E_TITLE:-}" ]]; the
   exit 0
 fi
 
-SPEC_PATH="apps/${E2E_PROJECT}/${E2E_SPEC}"
+SPEC_PATH="$(e2e_spec_path "$E2E_PROJECT" "$E2E_SPEC")"
 if [[ ! -f "$SPEC_PATH" ]]; then
   log "spec not found: $SPEC_PATH"
   clear_outputs

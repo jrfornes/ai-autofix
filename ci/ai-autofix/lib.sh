@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Shared helpers for the CI auto-fix agent.
-# Sourced by run.sh, agent-fix.sh, publish.sh and the *-bitbucket-pr.sh scripts.
+# Sourced by run.sh, agent-fix.sh, publish.sh, the *-bitbucket-pr.sh scripts and
+# the E2E chain (parse, isolate, tag, push).
 # Sourcing has no side effects beyond defining functions and config arrays.
 
 # ---------------------------------------------------------------------------
@@ -8,6 +9,16 @@
 # ---------------------------------------------------------------------------
 log() { echo "[ai-autofix] $*" >&2; }
 die() { log "FATAL: $*"; exit 1; }
+
+# ---------------------------------------------------------------------------
+# e2e layout
+# ---------------------------------------------------------------------------
+# The only place the monorepo layout is assumed: e2e projects live at
+# <E2E_PROJECTS_DIR>/<project>/, and E2E_SPEC is relative to the project
+# (what `nx run <project>:e2e --spec` takes).
+E2E_PROJECTS_DIR="apps"
+
+e2e_spec_path() { printf '%s/%s/%s\n' "$E2E_PROJECTS_DIR" "$1" "$2"; }
 
 # ---------------------------------------------------------------------------
 # stage configuration
