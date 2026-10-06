@@ -406,11 +406,9 @@ controls for environment differences that isolation does not.
 
 ### Open questions
 
-- Which `awk` is on the **Jenkins agent**? Revised by the 2026-09-30 pass: the
-  parser runs in a bare `sh` step, not inside the container, so the CI image's
-  awk never touches it. See the harness section. The suite now passes under
-  `mawk 1.3.4`, so the PR #1 fix is confirmed against the dialect that broke it
-  either way.
+- ~~Which `awk` is on the **Jenkins agent**?~~ Closed 2026-10-06: the parser
+  now runs inside the CI image, so the agent's awk no longer matters. See the
+  harness section.
 - Are Cypress retries enabled on PR runs? Gates the opportunity above.
 - Does the spec path survive into JUnit XML with our reporter version?
 - Is there a shared Nx e2e preset, or is `cypress.config.ts` duplicated per
@@ -875,8 +873,12 @@ it outside means its toolchain is whatever the agent happens to have.
 **Decision:**
 
 - Make the suite green standalone via action C-1, then wire it into CI.
-- Run it under both `mawk` and `gawk` where both are available; the portability
-  class of bug is invisible under one dialect.
+- ~~Run it under both `mawk` and `gawk` where both are available.~~ Superseded
+  2026-10-06: the CI image is the single awk runtime instead. The parser runs
+  in the image, `patch_paths` is pure bash (the publish re-gate is the one
+  `lib.sh` caller on the agent), and the harness runs once in the image and
+  prints which awk it used. Testing other dialects would test toolchains the
+  system never uses; a change to the image's awk is caught by the next build.
 - **A11** — add the end-to-end fixture run (parse → isolate → tag → gate) that
   still does not exist. With `AUTOFIX_ROOT` and the dry-run reordering in place
   this becomes possible without Cypress, and it is the check that would have
@@ -939,12 +941,15 @@ rediscovers them and treats them as work.
 - ~~`Jenkinsfile:167` — `params.SKIP_E2E_FLAKY_TESTS ?: true` makes the
   `E2E Tests - Flaky` stage unrunnable regardless of the parameter.~~ Fixed in
   Stage 0 with a null-safe check. The default is still `true`, so the flaky
-  stage runs only when someone unticks the box; whether it should run by
-  default is a separate decision and is not made here.
+  stage runs only when someone unticks the box. Decided 2026-10-06: the default
+  stays `true`.
 - ~~Nothing runs `validate-gates.sh` in CI.~~ Stage 0 adds the
-  `Validate Quarantine Gates` stage. It runs inside the CI image, which has
-  `node` and `git` for the tagger checks, so it covers the image's awk dialects
-  and **not** the agent's — the parser's real runtime is still unverified.
+  `Validate Quarantine Gates` stage, inside the CI image, blocking. Since
+  2026-10-06 the parser runs in the image too, so the harness checks the awk the
+  parser actually uses.
+- The CI image's awk is not pinned explicitly. `ci/Dockerfile` is not in this
+  extract; pin it there, or accept the base image's (`mawk` on Debian/Ubuntu,
+  which the parser supports). The harness log line shows which one is live.
 
 ## Decision log
 
@@ -964,3 +969,5 @@ rediscovers them and treats them as work.
 | 2026-09-30 | x-cut | Harness: 76/6 reproduced under `mawk 1.3.4`; the six failures are all action C-1. Make it green, run it under both awk dialects, wire it into CI, and add the A11 end-to-end fixture run. |
 | 2026-09-30 | B     | Correction: the parser runs on the Jenkins agent, not inside the CI image, so the agent's `awk`/`grep` are what matter. Replaces the original open question. |
 | 2026-10-06 | 0/C/D | **Stage 0 landed.** `Jenkinsfile:167` null-safe (default unchanged); C-1 (`AUTOFIX_ROOT` + dry-run before the spec guard) takes the harness to 84/0 under `mawk` and `gawk`; `validate-gates-all-awk.sh` runs it per dialect in a new CI stage inside the image. Reintroducing the PR #1 `{2,}` regex fails under `mawk` only, confirming the dialect shim bites. |
+| 2026-10-06 | 0/D   | Answers after Stage 0: `SKIP_E2E_FLAKY_TESTS` default stays `true`; the harness runs inside the CI image and blocks the build on failure. |
+| 2026-10-06 | B/x-cut | **Single awk runtime: the CI image.** The parser moves into the container; `patch_paths` drops awk so nothing on the agent needs it; `validate-gates-all-awk.sh` is deleted and the harness runs once, logging its awk. Closes the agent-awk open question and makes spike S2 moot. |

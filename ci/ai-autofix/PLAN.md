@@ -31,7 +31,7 @@ precedes Stage 3 if S7 shows the parser unreliable.
 | -- | -------- | ------- |
 | S0 | Is Format/Lint autofix used by anyone? | delete vs deprecate |
 | S1 | How many `@flaky` today; does the tolerant stage pass? | Stage 4 thresholds; whether detection is the problem at all |
-| S2 | Agent's `awk`/`grep` — the parser runs outside the container | Phase B portability |
+| ~~S2~~ | ~~Agent's `awk`/`grep`~~ — moot since 2026-10-06: the parser runs in the CI image | — |
 | S3 | `nx-e2e-affected.sh`: browser, retries, serve, parallelism | C-2; whether retries make Phase C optional |
 | S4 | `@cypress/grep` at the pinned version: `;`, leading `-`, substring vs regex | C-5 extend vs refuse |
 | S5 | Spec corpus: template titles, `;`/`-` titles, duplicates | how often the tagger aborts |

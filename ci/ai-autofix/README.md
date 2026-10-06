@@ -111,6 +111,7 @@ Phase C isolation dry-run / error-path checks (no real Cypress), Phase D
 quarantine tag shapes + content-gate rejects under `testdata/quarantine/`, and
 Phase E loop-guard / refuse-main checks for `push-e2e-quarantine.sh`.
 
-`./validate-gates-all-awk.sh` runs the same suite once per awk dialect
-present (`mawk`, `gawk`, busybox) and fails if any dialect fails. CI runs this
-form in the `Validate Quarantine Gates` stage, inside the CI image.
+CI runs it in the `Validate Quarantine Gates` stage, inside the CI image. That
+image's `awk` is the only one the system depends on — the parser runs in the
+container and nothing on the agent uses `awk` — so the suite runs once, and
+prints which `awk` it ran under.

@@ -9,6 +9,9 @@ RUN="${SCRIPT_DIR}/run.sh"
 # shellcheck source=lib.sh
 source "${SCRIPT_DIR}/lib.sh"
 
+# Results only hold for this awk; parse-e2e-failure.sh is its sole runtime user.
+echo "awk: $(command -v awk || echo none) — $({ awk -W version || awk --version; } </dev/null 2>&1 | head -n1)"
+
 PASS=0; FAIL=0
 ok()   { echo "PASS: $1"; PASS=$((PASS+1)); }
 bad()  { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
@@ -80,7 +83,16 @@ T="gate rejects config patch";       check not gate_patch "$BADP"
 T="gate rejects rename patch";        check not gate_patch "$REN"
 T="patch_paths extracts file"
 if patch_paths "$GOOD" | grep -qx apps/foo/src/app.ts; then ok "$T"; else bad "$T"; fi
-rm -f "$GOOD" "$BADP" "$REN"
+T="patch_paths: both rename sides, ignores indented/added headers, no final newline"
+PP="$(mktemp)"
+printf '%s\n' \
+  'diff --git a/apps/foo/src/a.ts b/apps/foo/src/b.ts' \
+  ' diff --git a/context/line b/context/line' \
+  '+diff --git a/added/line b/added/line' >"$PP"
+printf '%s' 'diff --git a/b/odd.ts b/b/odd.ts' >>"$PP"
+if [[ "$(patch_paths "$PP" | paste -sd, -)" == "apps/foo/src/a.ts,apps/foo/src/b.ts,b/odd.ts" ]]; then ok "$T"
+else bad "$T"; patch_paths "$PP"; fi
+rm -f "$GOOD" "$BADP" "$REN" "$PP"
 
 echo "== loop guard (needs a repo) =="
 TMPREPO="$(mktemp -d)"
