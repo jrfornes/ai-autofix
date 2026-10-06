@@ -88,6 +88,16 @@ pipeline {
             }
         }
 
+        stage('Validate Quarantine Gates') {
+            steps {
+                script {
+                    docker.image(env.DOCKER_IMAGE).inside('--privileged --ipc=host') {
+                        sh './ci/ai-autofix/validate-gates-all-awk.sh'
+                    }
+                }
+            }
+        }
+
         stage('Change Analysis') {
             when {
                 not { 
