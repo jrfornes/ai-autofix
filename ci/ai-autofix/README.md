@@ -14,8 +14,11 @@ with `parse-e2e-failure.sh`, and archive `ci-output.txt` + `e2e-failure.env`
 
 **Phase C:** When `e2e-failure.env` exists, re-run that one test via
 `isolate-e2e-failure.sh` (`nx --spec` + escaped `--env.grep` + `-@flaky`) and
-archive `e2e-isolation.env`. Kill switch: `SKIP_E2E_ISOLATION`. Still not
-autofix-eligible; no push.
+archive `e2e-isolation.env`. Verdict is `pass` only when exactly one test
+executed (Passing + Failing from the Cypress results table) and it passed;
+zero is `no_match`, more than one is `multi_match`. The file also records the
+evidence: browser, counts, duration and exact argv. Kill switch:
+`SKIP_E2E_ISOLATION`. Still not autofix-eligible; no push.
 
 **Phase D:** On isolation `pass`, `tag-e2e-flaky.sh` / `.mjs` adds `@flaky` to the
 matching leaf `it`, gates the single-file diff (`gate_e2e_quarantine_patch`), and
@@ -107,7 +110,10 @@ The Bitbucket token should be least-privilege: branch push + PR create/comment,
 
 `./validate-gates.sh` exercises the gates and helpers with no Bitbucket
 network access, including E2E parser fixtures under `testdata/e2e-fail-*.txt`,
-Phase C isolation dry-run / error-path checks (no real Cypress), Phase D
+Phase C isolation dry-run / error-path checks and verdicts from canned
+Cypress output via a fake `npx` (no real Cypress), an end-to-end parse →
+isolate → tag → gate run with a hostile title that every emitted `.env` must
+round-trip byte-for-byte, Phase D
 quarantine tag shapes + content-gate rejects under `testdata/quarantine/`, and
 Phase E loop-guard / refuse-main checks for `push-e2e-quarantine.sh`.
 

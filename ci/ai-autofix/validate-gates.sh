@@ -376,6 +376,66 @@ else
 fi
 rm -f "$ISO_OUT"
 
+# --- verdict from a real (faked) run: npx on PATH replays a Cypress log ---
+FAKE_BIN="$(mktemp -d)"
+cat >"${FAKE_BIN}/npx" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >"${FAKE_NPX_ARGV:-/dev/null}"
+[[ -n "${FAKE_NPX_LOG:-}" ]] && cat "$FAKE_NPX_LOG"
+exit "${FAKE_NPX_EXIT:-0}"
+EOF
+chmod +x "${FAKE_BIN}/npx"
+
+# cypress_box TESTS PASSING FAILING PENDING — the per-spec (Results) table.
+cypress_box() {
+  printf '  │ Tests:        %s │\n  │ Passing:      %s │\n  │ Failing:      %s │\n  │ Pending:      %s │\n  │ Skipped:      0 │\n' "$@"
+}
+
+ISO_ROOT="$(mktemp -d)"
+mkdir -p "$ISO_ROOT/apps/acme-app-e2e/src/e2e/module-a/local"
+touch "$ISO_ROOT/apps/acme-app-e2e/src/e2e/module-a/local/products.cy.ts"
+FAKE_LOG="$(mktemp)"
+
+# isolate_case NAME EXIT WANT_RESULT WANT_MATCHED BOX_ARGS...  (no box args → no results table)
+isolate_case() {
+  local name="$1" fexit="$2" want="$3" want_matched="$4"; shift 4
+  if [[ "$#" -gt 0 ]]; then cypress_box "$@" >"$FAKE_LOG"; else echo "webpack compile error" >"$FAKE_LOG"; fi
+  rm -f "$ISO_OUT"
+  env PATH="${FAKE_BIN}:${PATH}" AUTOFIX_ROOT="$ISO_ROOT" FAKE_NPX_LOG="$FAKE_LOG" FAKE_NPX_EXIT="$fexit" \
+    "$ISO" "$SAMPLE" "$ISO_OUT" >/dev/null 2>&1 || true
+  T="isolate verdict: ${name}"
+  # shellcheck disable=SC1090
+  if [[ -f "$ISO_OUT" ]] && set -a && source "$ISO_OUT" && set +a \
+    && [[ "$ISOLATION_RESULT" == "$want" && "$ISOLATION_MATCHED" == "$want_matched" ]]; then
+    ok "$T"
+  else
+    bad "$T (want ${want}/${want_matched})"; cat "$ISO_OUT" 2>/dev/null || true
+  fi
+  unset ISOLATION_RESULT ISOLATION_MATCHED
+}
+isolate_case "one test passed → pass"               0   pass        1  1 1 0 0
+isolate_case "one test failed → fail"               1   fail        1  1 0 1 0
+isolate_case "filtered tests pending, none ran"     0   no_match    0  4 0 0 4
+isolate_case "grep hit two tests → multi_match"     0   multi_match 2  2 2 0 0
+isolate_case "no results table → no_match"          1   no_match    ""
+isolate_case "timeout → error"                      124 error       ""
+
+isolate_case "evidence run" 0 pass 1 3 1 0 2 >/dev/null
+T="pass verdict records evidence (browser, counts, duration, argv)"
+# shellcheck disable=SC1090
+if set -a && source "$ISO_OUT" && set +a \
+  && [[ "$ISOLATION_BROWSER" == "chromium" && "$ISOLATION_PASSING" == "1" \
+     && "$ISOLATION_FAILING" == "0" && "$ISOLATION_PENDING" == "2" \
+     && "$ISOLATION_DURATION_S" =~ ^[0-9]+$ \
+     && "$ISOLATION_ARGV" == "npx nx run acme-app-e2e:e2e --browser=chromium "* ]]; then
+  ok "$T"
+else
+  bad "$T"; cat "$ISO_OUT"
+fi
+rm -rf "$ISO_ROOT" "$FAKE_LOG"
+rm -f "$ISO_OUT"
+unset E2E_PROJECT E2E_SPEC E2E_TITLE "${!ISOLATION_@}" 2>/dev/null || true
+
 echo "== tag-e2e-flaky + gate_e2e_quarantine_patch =="
 TAG_SH="${SCRIPT_DIR}/tag-e2e-flaky.sh"
 TAG_MJS="${SCRIPT_DIR}/tag-e2e-flaky.mjs"
@@ -512,6 +572,82 @@ else bad "$T"; (cd "$wrap_root" && git status --porcelain); fi
 rm -rf "$edit_tmp" "$wrap_root"
 rm -f "$ISO_PASS" "$ISO_FAIL"
 unset E2E_PROJECT E2E_SPEC E2E_TITLE ISOLATION_RESULT AUTOFIX_SOURCE AUTOFIX_PATHS FAILED_STAGE 2>/dev/null || true
+
+# Every .env in the chain is later sourced by the shell holding the Bitbucket
+# token, so a PR-authored title must survive each producer byte-for-byte.
+echo "== chain: parse → isolate → tag → gate, hostile title =="
+HOSTILE_TITLE="$(cat <<'EOF'
+it's "q" $(touch PWNED) `touch PWNED2` ; $HOME \ end
+EOF
+)"
+chain_root="$(mktemp -d)"; SANDBOX="$(mktemp -d)"
+CHAIN_SPEC_REL="src/e2e/hostile.cy.ts"
+CHAIN_SPEC="apps/hostile-e2e/${CHAIN_SPEC_REL}"
+mkdir -p "$chain_root/apps/hostile-e2e/src/e2e"
+cat >"$chain_root/$CHAIN_SPEC" <<'EOF'
+describe('Hostile', () => {
+  it("it's \"q\" $(touch PWNED) `touch PWNED2` ; $HOME \\ end", () => {
+    cy.get('body').should('exist');
+  });
+});
+EOF
+(cd "$chain_root" && git init -q && git add -A && git -c user.email=t@t -c user.name=t commit -qm init)
+CHAIN_LOG="$(mktemp)"
+cat >"$CHAIN_LOG" <<EOF
+> nx run hostile-e2e:e2e --browser=chromium --env.grepTags=-@flaky
+
+  Running:  ${CHAIN_SPEC_REL}                          (1 of 1)
+
+  Spec Ran:     ${CHAIN_SPEC_REL}
+
+  1 failing
+
+  1) Hostile
+       ${HOSTILE_TITLE}:
+     AssertionError: boom
+
+Failed tasks:
+
+- hostile-e2e:e2e
+EOF
+
+sourced_title() {  # E2E_TITLE as the publish shell would see it, sourced in a sandbox
+  ( cd "$SANDBOX" && unset E2E_TITLE && set -a && source "$1" && set +a && printf '%s' "$E2E_TITLE" )
+}
+round_trip() {
+  T="round-trip: $1 title is byte-identical"
+  if [[ -f "$2" && "$(sourced_title "$2")" == "$HOSTILE_TITLE" ]]; then ok "$T"
+  else bad "$T"; cat "$2" 2>/dev/null; fi
+}
+
+assert_exit "chain: parse" 0 "$PARSE" "$CHAIN_LOG" "$chain_root/e2e-failure.env"
+round_trip "e2e-failure.env" "$chain_root/e2e-failure.env"
+
+cypress_box 1 1 0 0 >"$FAKE_LOG"
+FAKE_ARGV="$(mktemp)"
+assert_exit "chain: isolate" 0 \
+  env PATH="${FAKE_BIN}:${PATH}" AUTOFIX_ROOT="$chain_root" FAKE_NPX_LOG="$FAKE_LOG" FAKE_NPX_ARGV="$FAKE_ARGV" \
+  "$ISO" e2e-failure.env e2e-isolation.env
+round_trip "e2e-isolation.env" "$chain_root/e2e-isolation.env"
+T="chain: isolate ran the parsed spec with a metachar-escaped grep"
+if grep -qx -- "--spec=${CHAIN_SPEC_REL}" "$FAKE_ARGV" && grep -qF -- '\$\(touch PWNED\)' "$FAKE_ARGV"; then ok "$T"
+else bad "$T"; cat "$FAKE_ARGV"; fi
+
+assert_exit "chain: tag" 0 \
+  env AUTOFIX_ROOT="$chain_root" "$TAG_SH" e2e-isolation.env e2e-quarantine.patch e2e-quarantine.env
+round_trip "e2e-quarantine.env" "$chain_root/e2e-quarantine.env"
+T="chain: quarantine patch clears the gate"
+if [[ -s "$chain_root/e2e-quarantine.patch" ]] \
+  && gate_e2e_quarantine_patch "$chain_root/e2e-quarantine.patch" "$CHAIN_SPEC"; then ok "$T"
+else bad "$T"; cat "$chain_root/e2e-quarantine.patch" 2>/dev/null; fi
+
+T="chain: nothing in the title was executed"
+if ! compgen -G "$SANDBOX/PWNED*" >/dev/null && ! compgen -G "$chain_root/PWNED*" >/dev/null \
+  && ! compgen -G "./PWNED*" >/dev/null; then ok "$T"
+else bad "$T"; ls "$SANDBOX" "$chain_root"; fi
+
+rm -rf "$chain_root" "$SANDBOX" "$FAKE_BIN"
+rm -f "$CHAIN_LOG" "$FAKE_LOG" "$FAKE_ARGV"
 
 echo
 echo "Results: ${PASS} passed, ${FAIL} failed"
