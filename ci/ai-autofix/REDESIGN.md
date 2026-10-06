@@ -747,6 +747,10 @@ easier to state and to check than what exists today.
 
 ### Actions
 
+Status 2026-10-06: E-1, E-3, E-4, E-5 done; E-6 done except dropping the
+Format/Lint wording, which waits for Stage 1. E-2 and E-7 are Stage 6; E-8 waits
+on the noise question below.
+
 - **E-1.** Get the token out of process arguments in both paths.
 - **E-2.** Apply mode comments as well as pushes, quoting the C-3 evidence and
   stating plainly what isolation does and does not prove.
@@ -985,3 +989,4 @@ rediscovers them and treats them as work.
 | 2026-10-06 | B/x-cut | **Single awk runtime: the CI image.** The parser moves into the container; `patch_paths` drops awk so nothing on the agent needs it; `validate-gates-all-awk.sh` is deleted and the harness runs once, logging its awk. Closes the agent-awk open question and makes spike S2 moot. |
 | 2026-10-06 | C     | C-3/C-4/C-6 landed. Verdict counts executed tests (Passing + Failing), not `Tests:` — the old guard passed a grep that matched nothing whenever filtered tests were reported Pending. New `multi_match` verdict; evidence (browser, counts, duration, argv) recorded and carried into `e2e-quarantine.env`. Layout lives in `lib.sh` (`E2E_PROJECTS_DIR`, `e2e_spec_path`). |
 | 2026-10-06 | x-cut | A11 and the `%q` round-trip check landed as one harness section: a hostile title runs through the real parse → isolate → tag → gate chain and must source back byte-identical from every `.env`. Verified to fail when `%q` is dropped from any single producer. |
+| 2026-10-06 | E     | E-1/E-3/E-4/E-5/E-6 landed. Token reaches `curl` via a stdin config and `git` via a `GIT_CONFIG_*` header (git ≥ 2.31, refused otherwise); fetch uses the push URL; loop guard checks the fetched tip; workspace/slug explicit or derived from `origin`, never defaulted; comments use `jq`, a `mktemp` response, a 32 KiB inline cap, and quote the isolation evidence with a "judgement, not proof" caveat. Unverified on the real agent: git version, `jq` presence, and that `origin` is a bitbucket.org URL. |

@@ -102,9 +102,13 @@ Environment (set by Jenkins):
 | `AI_AUTOFIX_MODE`         | `plan` \| `apply` \| `off`                                 |
 | `AI_AUTOFIX_ARTIFACT_DIR` | Format/Lint patch dir — **must be outside the repo**       |
 | `BITBUCKET_AUTOFIX_TOKEN` | Publish only; scope to push + comment + create-PR          |
+| `BITBUCKET_WORKSPACE` / `BITBUCKET_REPO_SLUG` | Optional, set both or neither; otherwise derived from `origin`'s bitbucket.org URL. No default |
 
 The Bitbucket token should be least-privilege: branch push + PR create/comment,
-**no merge**.
+**no merge**. The E2E publish scripts never put it in argv or a URL: `curl`
+reads it from a config on stdin, and `git` gets it as an HTTP header through
+`GIT_CONFIG_*` (needs git ≥ 2.31; older git is refused, not worked around).
+PR comments need `jq` on the agent.
 
 ## Local checks
 
