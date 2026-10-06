@@ -164,7 +164,8 @@ pipeline {
             when {
                 not { 
                     expression { 
-                        return params.SKIP_E2E_FLAKY_TESTS ?: true 
+                        // Not `?: true`: Elvis would turn a deliberate false back into true.
+                        return params.SKIP_E2E_FLAKY_TESTS == null ? true : params.SKIP_E2E_FLAKY_TESTS
                     }
                 }
             }
