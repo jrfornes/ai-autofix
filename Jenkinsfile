@@ -213,17 +213,23 @@ pipeline {
                 // Phase B + C + D: E2E identity parse, isolate, optional @flaky patch (not autofix-eligible).
                 if (env.FAILED_STAGE == 'E2E Tests') {
                     try {
-                        if (fileExists('ci-output.txt')) {
+                        if (!fileExists('ci-output.txt')) {
+                            echo 'E2E capture skipped: ci-output.txt missing'
+                        } else if (!env.DOCKER_IMAGE) {
+                            echo 'E2E failure parse skipped: DOCKER_IMAGE not set; no e2e-failure.env'
+                        } else {
                             sh 'chmod +x ci/ai-autofix/parse-e2e-failure.sh ci/ai-autofix/isolate-e2e-failure.sh ci/ai-autofix/tag-e2e-flaky.sh'
-                            def parseStatus = sh(
-                                script: './ci/ai-autofix/parse-e2e-failure.sh ci-output.txt e2e-failure.env',
-                                returnStatus: true
-                            )
+                            // In the CI image, not on the agent: the image's awk is the one the harness validates.
+                            def parseStatus = 0
+                            docker.image(env.DOCKER_IMAGE).inside('--privileged --ipc=host') {
+                                parseStatus = sh(
+                                    script: './ci/ai-autofix/parse-e2e-failure.sh ci-output.txt e2e-failure.env',
+                                    returnStatus: true
+                                )
+                            }
                             if (parseStatus != 0) {
                                 echo 'E2E failure parse ambiguous or incomplete; no e2e-failure.env'
                             }
-                        } else {
-                            echo 'E2E capture skipped: ci-output.txt missing'
                         }
 
                         // Phase C: isolate one failing test when parse produced an env file.
