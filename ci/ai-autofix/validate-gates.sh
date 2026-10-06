@@ -292,8 +292,9 @@ MISS_SPEC="$(mktemp)"
   echo "E2E_TITLE=some\ title"
 } >"$MISS_SPEC"
 rm -f "$ISO_OUT"
+ISO_ROOT="$(mktemp -d)"
 assert_exit "isolate missing spec exits 1" 1 \
-  "$ISO" "$MISS_SPEC" "$ISO_OUT"
+  env AUTOFIX_ROOT="$ISO_ROOT" "$ISO" "$MISS_SPEC" "$ISO_OUT"
 T="missing spec writes error verdict"
 # shellcheck disable=SC1090
 if [[ -f "$ISO_OUT" ]] && set -a && source "$ISO_OUT" && set +a \
@@ -331,6 +332,22 @@ if grep -q -- '--env.grepTags=-@flaky' "$DRY_LOG"; then ok "$T"; else bad "$T"; 
 T="dry-run argv targets acme-app-e2e:e2e"
 if grep -q 'acme-app-e2e:e2e' "$DRY_LOG"; then ok "$T"; else bad "$T"; cat "$DRY_LOG"; fi
 rm -f "$ISO_OUT" "$DRY_LOG"
+unset E2E_PROJECT E2E_SPEC E2E_TITLE ISOLATION_RESULT ISOLATION_EXIT ISOLATION_ATTEMPTS 2>/dev/null || true
+
+# AUTOFIX_ROOT: relative in/out paths resolve under the override, not the repo
+cp "$SAMPLE" "$ISO_ROOT/e2e-failure.env"
+assert_exit "isolate dry-run under AUTOFIX_ROOT exits 0" 0 \
+  env ISOLATE_E2E_DRY_RUN=1 AUTOFIX_ROOT="$ISO_ROOT" "$ISO" e2e-failure.env e2e-isolation.env
+T="AUTOFIX_ROOT receives the verdict"
+# shellcheck disable=SC1090
+if [[ -f "$ISO_ROOT/e2e-isolation.env" && ! -e "${ROOT}/e2e-isolation.env" ]] \
+  && set -a && source "$ISO_ROOT/e2e-isolation.env" && set +a \
+  && [[ "$ISOLATION_RESULT" == "dry-run" ]]; then
+  ok "$T"
+else
+  bad "$T"; ls -la "$ISO_ROOT"
+fi
+rm -rf "$ISO_ROOT"
 unset E2E_PROJECT E2E_SPEC E2E_TITLE ISOLATION_RESULT ISOLATION_EXIT ISOLATION_ATTEMPTS 2>/dev/null || true
 
 # Kill switch

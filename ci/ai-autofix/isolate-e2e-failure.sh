@@ -3,7 +3,7 @@
 # Soft-fail in Jenkins — callers ignore this exit status for build result.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT="${AUTOFIX_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 IN="${1:-e2e-failure.env}"
 OUT="${2:-e2e-isolation.env}"
 ATTEMPTS=1
@@ -73,9 +73,6 @@ if [[ -z "${E2E_PROJECT:-}" || -z "${E2E_SPEC:-}" || -z "${E2E_TITLE:-}" ]]; the
   finish_error 1
 fi
 
-SPEC_PATH="apps/${E2E_PROJECT}/${E2E_SPEC}"
-[[ -f "$SPEC_PATH" ]] || finish_error 1
-
 GREP_PATTERN="$(escape_grep "$E2E_TITLE")"
 
 NX_ARGV=(
@@ -93,6 +90,9 @@ if [[ "${ISOLATE_E2E_DRY_RUN:-}" == "1" ]]; then
   write_verdict dry-run 0
   exit 0
 fi
+
+SPEC_PATH="apps/${E2E_PROJECT}/${E2E_SPEC}"
+[[ -f "$SPEC_PATH" ]] || finish_error 1
 
 export CI=true
 export NX_DAEMON=false
