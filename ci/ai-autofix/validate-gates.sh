@@ -376,6 +376,66 @@ else
 fi
 rm -f "$ISO_OUT"
 
+# --- verdict from a real (faked) run: npx on PATH replays a Cypress log ---
+FAKE_BIN="$(mktemp -d)"
+cat >"${FAKE_BIN}/npx" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >"${FAKE_NPX_ARGV:-/dev/null}"
+[[ -n "${FAKE_NPX_LOG:-}" ]] && cat "$FAKE_NPX_LOG"
+exit "${FAKE_NPX_EXIT:-0}"
+EOF
+chmod +x "${FAKE_BIN}/npx"
+
+# cypress_box TESTS PASSING FAILING PENDING — the per-spec (Results) table.
+cypress_box() {
+  printf '  │ Tests:        %s │\n  │ Passing:      %s │\n  │ Failing:      %s │\n  │ Pending:      %s │\n  │ Skipped:      0 │\n' "$@"
+}
+
+ISO_ROOT="$(mktemp -d)"
+mkdir -p "$ISO_ROOT/apps/acme-app-e2e/src/e2e/module-a/local"
+touch "$ISO_ROOT/apps/acme-app-e2e/src/e2e/module-a/local/products.cy.ts"
+FAKE_LOG="$(mktemp)"
+
+# isolate_case NAME EXIT WANT_RESULT WANT_MATCHED BOX_ARGS...  (no box args → no results table)
+isolate_case() {
+  local name="$1" fexit="$2" want="$3" want_matched="$4"; shift 4
+  if [[ "$#" -gt 0 ]]; then cypress_box "$@" >"$FAKE_LOG"; else echo "webpack compile error" >"$FAKE_LOG"; fi
+  rm -f "$ISO_OUT"
+  env PATH="${FAKE_BIN}:${PATH}" AUTOFIX_ROOT="$ISO_ROOT" FAKE_NPX_LOG="$FAKE_LOG" FAKE_NPX_EXIT="$fexit" \
+    "$ISO" "$SAMPLE" "$ISO_OUT" >/dev/null 2>&1 || true
+  T="isolate verdict: ${name}"
+  # shellcheck disable=SC1090
+  if [[ -f "$ISO_OUT" ]] && set -a && source "$ISO_OUT" && set +a \
+    && [[ "$ISOLATION_RESULT" == "$want" && "$ISOLATION_MATCHED" == "$want_matched" ]]; then
+    ok "$T"
+  else
+    bad "$T (want ${want}/${want_matched})"; cat "$ISO_OUT" 2>/dev/null || true
+  fi
+  unset ISOLATION_RESULT ISOLATION_MATCHED
+}
+isolate_case "one test passed → pass"               0   pass        1  1 1 0 0
+isolate_case "one test failed → fail"               1   fail        1  1 0 1 0
+isolate_case "filtered tests pending, none ran"     0   no_match    0  4 0 0 4
+isolate_case "grep hit two tests → multi_match"     0   multi_match 2  2 2 0 0
+isolate_case "no results table → no_match"          1   no_match    ""
+isolate_case "timeout → error"                      124 error       ""
+
+isolate_case "evidence run" 0 pass 1 3 1 0 2 >/dev/null
+T="pass verdict records evidence (browser, counts, duration, argv)"
+# shellcheck disable=SC1090
+if set -a && source "$ISO_OUT" && set +a \
+  && [[ "$ISOLATION_BROWSER" == "chromium" && "$ISOLATION_PASSING" == "1" \
+     && "$ISOLATION_FAILING" == "0" && "$ISOLATION_PENDING" == "2" \
+     && "$ISOLATION_DURATION_S" =~ ^[0-9]+$ \
+     && "$ISOLATION_ARGV" == "npx nx run acme-app-e2e:e2e --browser=chromium "* ]]; then
+  ok "$T"
+else
+  bad "$T"; cat "$ISO_OUT"
+fi
+rm -rf "$ISO_ROOT" "$FAKE_LOG"
+rm -f "$ISO_OUT"
+unset E2E_PROJECT E2E_SPEC E2E_TITLE "${!ISOLATION_@}" 2>/dev/null || true
+
 echo "== tag-e2e-flaky + gate_e2e_quarantine_patch =="
 TAG_SH="${SCRIPT_DIR}/tag-e2e-flaky.sh"
 TAG_MJS="${SCRIPT_DIR}/tag-e2e-flaky.mjs"

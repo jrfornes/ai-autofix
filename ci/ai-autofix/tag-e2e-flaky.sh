@@ -29,7 +29,11 @@ fi
 
 [[ -f "$IN" ]] || { log "missing isolation env: $IN"; clear_outputs; exit 0; }
 
-unset E2E_PROJECT E2E_SPEC E2E_TITLE ISOLATION_RESULT
+EVIDENCE_KEYS=(
+  ISOLATION_ATTEMPTS ISOLATION_BROWSER ISOLATION_MATCHED ISOLATION_PASSING
+  ISOLATION_FAILING ISOLATION_PENDING ISOLATION_DURATION_S ISOLATION_ARGV
+)
+unset E2E_PROJECT E2E_SPEC E2E_TITLE ISOLATION_RESULT "${EVIDENCE_KEYS[@]}"
 # shellcheck disable=SC1090
 set -a && source "$IN" && set +a
 
@@ -100,6 +104,9 @@ fi
   echo "E2E_TITLE=$(printf '%q' "$E2E_TITLE")"
   echo "AUTOFIX_PATHS=$(printf '%q' "$SPEC_PATH")"
   echo "ISOLATION_RESULT=$(printf '%q' "pass")"
+  for k in "${EVIDENCE_KEYS[@]}"; do
+    echo "${k}=$(printf '%q' "${!k:-}")"
+  done
 } >"$ENV_OUT"
 
 log "quarantine patch ready: $PATCH_OUT"
