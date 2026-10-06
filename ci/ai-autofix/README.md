@@ -110,3 +110,7 @@ network access, including E2E parser fixtures under `testdata/e2e-fail-*.txt`,
 Phase C isolation dry-run / error-path checks (no real Cypress), Phase D
 quarantine tag shapes + content-gate rejects under `testdata/quarantine/`, and
 Phase E loop-guard / refuse-main checks for `push-e2e-quarantine.sh`.
+
+`./validate-gates-all-awk.sh` runs the same suite once per awk dialect
+present (`mawk`, `gawk`, busybox) and fails if any dialect fails. CI runs this
+form in the `Validate Quarantine Gates` stage, inside the CI image.

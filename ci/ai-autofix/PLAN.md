@@ -21,7 +21,8 @@ calendar time.
 | 5 | `after:spec` JSON, collector tiebreak, artifact location (P0-2), C-7, `jq` over `source`; E2 | D5 |
 | 6 | Enable apply — canary one project, then widen; E-7; rename | D2 + Stage 4 |
 
-Stage 0 ships alone, no unknowns. Stage 1 runs parallel with Stage 2. Stage 5
+Stage 0 ships alone, no unknowns — done 2026-10-06 (see the `REDESIGN.md`
+decision log). Stage 1 runs parallel with Stage 2. Stage 5
 precedes Stage 3 if S7 shows the parser unreliable.
 
 ## Spikes

@@ -936,11 +936,15 @@ rediscovers them and treats them as work.
   file sits at the root. Confirm the real location in the monorepo.
 - `README.md` documents Phases A–E as built and will need rewriting once the
   pivot lands.
-- `Jenkinsfile:167` — `params.SKIP_E2E_FLAKY_TESTS ?: true` makes the
-  `E2E Tests - Flaky` stage unrunnable regardless of the parameter. Not a loose
-  end so much as the blocking Phase D finding; listed here too because it is a
-  one-line fix that is independent of the redesign.
-- Nothing runs `validate-gates.sh` in CI. See the harness section.
+- ~~`Jenkinsfile:167` — `params.SKIP_E2E_FLAKY_TESTS ?: true` makes the
+  `E2E Tests - Flaky` stage unrunnable regardless of the parameter.~~ Fixed in
+  Stage 0 with a null-safe check. The default is still `true`, so the flaky
+  stage runs only when someone unticks the box; whether it should run by
+  default is a separate decision and is not made here.
+- ~~Nothing runs `validate-gates.sh` in CI.~~ Stage 0 adds the
+  `Validate Quarantine Gates` stage. It runs inside the CI image, which has
+  `node` and `git` for the tagger checks, so it covers the image's awk dialects
+  and **not** the agent's — the parser's real runtime is still unverified.
 
 ## Decision log
 
@@ -959,3 +963,4 @@ rediscovers them and treats them as work.
 | 2026-09-30 | x-cut | Credential boundary confirmed sound and simplified by the pivot (no credentialed step inside the container). Its one unenforced assumption — `printf %q` on every emitted value — becomes a `validate-gates.sh` round-trip check. |
 | 2026-09-30 | x-cut | Harness: 76/6 reproduced under `mawk 1.3.4`; the six failures are all action C-1. Make it green, run it under both awk dialects, wire it into CI, and add the A11 end-to-end fixture run. |
 | 2026-09-30 | B     | Correction: the parser runs on the Jenkins agent, not inside the CI image, so the agent's `awk`/`grep` are what matter. Replaces the original open question. |
+| 2026-10-06 | 0/C/D | **Stage 0 landed.** `Jenkinsfile:167` null-safe (default unchanged); C-1 (`AUTOFIX_ROOT` + dry-run before the spec guard) takes the harness to 84/0 under `mawk` and `gawk`; `validate-gates-all-awk.sh` runs it per dialect in a new CI stage inside the image. Reintroducing the PR #1 `{2,}` regex fails under `mawk` only, confirming the dialect shim bites. |
