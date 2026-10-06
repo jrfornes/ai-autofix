@@ -171,6 +171,73 @@ check bash -c "grep -q 'quarantine as' '${SCRIPT_DIR}/comment-bitbucket-pr.sh'"
 T="is_bot_change body has no [cursor-autofix] substring match";
 check bash -c "! awk '/^is_bot_change\\(\\)/,/^}/' '${SCRIPT_DIR}/lib.sh' | grep -q '\\[cursor-autofix\\]'"
 
+echo "== bitbucket repo + token handling (E-1, E-5) =="
+bb_repo_in() {  # ORIGIN_URL [VAR=VALUE...] → bitbucket_repo output from a repo with that origin
+  local url="$1"; shift
+  local r; r="$(mktemp -d)"
+  git -C "$r" init -q && git -C "$r" remote add origin "$url"
+  (cd "$r" && env BITBUCKET_WORKSPACE= BITBUCKET_REPO_SLUG= "$@" \
+    bash -c "source '${SCRIPT_DIR}/lib.sh'; bitbucket_repo" 2>/dev/null)
+  local st=$?; rm -rf "$r"; return "$st"
+}
+T="repo from https origin";  check test "$(bb_repo_in https://bitbucket.org/ws1/slug1.git)" = ws1/slug1
+T="repo from ssh origin";    check test "$(bb_repo_in git@bitbucket.org:ws2/slug2.git)" = ws2/slug2
+T="explicit repo wins";      check test "$(bb_repo_in https://bitbucket.org/a/b.git BITBUCKET_WORKSPACE=x BITBUCKET_REPO_SLUG=y)" = x/y
+T="non-bitbucket origin fails loudly"; check not bb_repo_in https://github.com/a/b.git
+T="half-set repo vars fail";           check not bb_repo_in https://bitbucket.org/a/b.git BITBUCKET_WORKSPACE=x
+T="token with quote rejected"
+check not env BITBUCKET_AUTOFIX_TOKEN='abc"def' bash -c "source '${SCRIPT_DIR}/lib.sh'; bitbucket_token_ok 2>/dev/null"
+
+SECRET="SeCrEt-token_123"
+SHIM_BIN="$(mktemp -d)"; ARGV_LOG="$(mktemp)"; CURL_STDIN="$(mktemp)"; CURL_DATA="$(mktemp)"
+REAL_GIT="$(command -v git)"
+cat >"${SHIM_BIN}/curl" <<EOF
+#!/usr/bin/env bash
+printf 'curl %s\n' "\$*" >>"${ARGV_LOG}"
+cat >"${CURL_STDIN}"
+out=""; prev=""
+for a in "\$@"; do
+  [[ "\$prev" == "-o" ]] && out="\$a"
+  [[ "\$prev" == "--data-binary" ]] && cp "\${a#@}" "${CURL_DATA}"
+  prev="\$a"
+done
+[[ -n "\$out" ]] && echo '{"error":"fake"}' >"\$out"
+printf '%s' "\${FAKE_HTTP_CODE:-201}"
+EOF
+cat >"${SHIM_BIN}/git" <<EOF
+#!/usr/bin/env bash
+printf 'git %s\n' "\$*" >>"${ARGV_LOG}"
+exec "${REAL_GIT}" "\$@"
+EOF
+chmod +x "${SHIM_BIN}/curl" "${SHIM_BIN}/git"
+
+COMMENT_PATCH="$(mktemp)"
+printf 'diff --git a/x.cy.ts b/x.cy.ts\n+  it(%s, { tags: [%s] }, () => {\n' "'t'" "'@flaky'" >"$COMMENT_PATCH"
+comment_run() {
+  : >"$ARGV_LOG"
+  run_clean PATH="${SHIM_BIN}:${PATH}" BITBUCKET_AUTOFIX_TOKEN="$SECRET" CHANGE_ID=7 \
+    BITBUCKET_WORKSPACE=ws BITBUCKET_REPO_SLUG=slug FAILED_STAGE="E2E Tests" AUTOFIX_SOURCE=e2e-flake \
+    E2E_PROJECT=p-e2e E2E_SPEC=src/e2e/x.cy.ts E2E_TITLE=t \
+    ISOLATION_BROWSER=chromium ISOLATION_MATCHED=1 ISOLATION_ATTEMPTS=1 \
+    "$@" "${SCRIPT_DIR}/comment-bitbucket-pr.sh" "$COMMENT_PATCH"
+}
+assert_exit "comment posts (fake curl 201)" 0 comment_run
+T="comment: token not in curl argv";  check not grep -qF "$SECRET" "$ARGV_LOG"
+T="comment: token reaches curl via stdin config"; check grep -qF "Authorization: Bearer ${SECRET}" "$CURL_STDIN"
+T="comment: posts to the PR comments endpoint"
+check grep -qF "https://api.bitbucket.org/2.0/repositories/ws/slug/pullrequests/7/comments" "$ARGV_LOG"
+T="comment: body inlines diff and quotes evidence"
+check bash -c "jq -er .content.raw '$CURL_DATA' | grep -qF '\`\`\`diff' && jq -er .content.raw '$CURL_DATA' | grep -qF -- '- Tests executed: 1' && jq -er .content.raw '$CURL_DATA' | grep -qF 'not a proof'"
+comment_run MAX_PATCH_BYTES=10 >/dev/null 2>&1
+T="comment: oversized patch is referenced, not inlined"
+check bash -c "jq -er .content.raw '$CURL_DATA' | grep -qF 'too large to inline' && ! jq -er .content.raw '$CURL_DATA' | grep -qF '\`\`\`diff'"
+assert_exit "comment: HTTP 400 exits 1" 1 comment_run FAKE_HTTP_CODE=400
+T="comment: response file is not a fixed /tmp path"
+check not grep -qF "/tmp/bb-comment-response.json" "${SCRIPT_DIR}/comment-bitbucket-pr.sh"
+rm -f "$COMMENT_PATCH"
+
+rm -rf "$SHIM_BIN"; rm -f "$ARGV_LOG" "$CURL_STDIN" "$CURL_DATA"
+
 echo "== publish.sh exports sourced artifact env (exec boundary) =="
 PUB_META="$(mktemp)"; PUB_CHILD="$(mktemp)"
 cat >"$PUB_META" <<'EOF'
