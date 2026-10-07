@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Shared helpers for the CI auto-fix agent.
-# Sourced by run.sh, agent-fix.sh, publish.sh, the *-bitbucket-pr.sh scripts and
-# the E2E chain (parse, isolate, tag, push).
-# Sourcing has no side effects beyond defining functions and config arrays.
+# Shared helpers for the E2E flaky-test quarantine chain.
+# Sourced by parse, isolate, tag, push-e2e-quarantine and comment-bitbucket-pr.
+# Sourcing has no side effects beyond defining functions and constants.
 
 # ---------------------------------------------------------------------------
 # logging
@@ -21,65 +20,8 @@ E2E_PROJECTS_DIR="apps"
 e2e_spec_path() { printf '%s/%s/%s\n' "$E2E_PROJECTS_DIR" "$1" "$2"; }
 
 # ---------------------------------------------------------------------------
-# stage configuration
-# ---------------------------------------------------------------------------
-# Only these Jenkins stages are eligible for autofix (Phase A: format/lint only).
-ELIGIBLE_STAGES=("Check Format" "Lint")
-
-is_eligible_stage() {
-  local want="$1" s
-  for s in "${ELIGIBLE_STAGES[@]}"; do [[ "$s" == "$want" ]] && return 0; done
-  return 1
-}
-
-# Reproduce a stage's check. Exits non-zero when broken, zero when fixed.
-# Requires CHANGE_TARGET. This is the authoritative gate, run by CI on a clean
-# tree — never trust a fixer claim that it fixed anything.
-verify_cmd() {
-  case "$1" in
-    "Check Format") npx nx format:check --base "origin/${CHANGE_TARGET}" --head HEAD ;;
-    "Lint")         npx nx affected --target=lint --base "origin/${CHANGE_TARGET}" ;;
-    *)              return 2 ;;
-  esac
-}
-
-# A pure, deterministic autofixer for a stage (no LLM, no injection surface),
-# or non-zero if the stage has no safe deterministic fix.
-deterministic_fix() {
-  case "$1" in
-    "Check Format") npx nx format:write --base "origin/${CHANGE_TARGET}" ;;
-    "Lint")         npx nx affected --target=lint --fix --base "origin/${CHANGE_TARGET}" ;;
-    *)              return 3 ;;
-  esac
-}
-
-has_deterministic_fix() {
-  case "$1" in "Check Format"|"Lint") return 0 ;; *) return 1 ;; esac
-}
-
-# ---------------------------------------------------------------------------
 # loop prevention
 # ---------------------------------------------------------------------------
-autofix_branch_prefix="cursor/ci-autofix-"
-
-# True if this change was itself produced by a prior Format/Lint autofix.
-# Derives the branch from CI env ONLY. `git rev-parse HEAD` returns the literal
-# string "HEAD" on the detached checkouts Jenkins uses for PR builds, so it is
-# useless as a branch signal. Unknown ref => treat as bot (fail safe).
-# Does NOT treat Cursor-Autofix: e2e-flake (or [cursor-autofix] in subject alone)
-# as bot — quarantine pushes land on the feature branch and must not disable
-# Format/Lint autofix on the next build.
-is_bot_change() {
-  local branch="${CHANGE_BRANCH:-${BRANCH_NAME:-}}"
-  if [[ -z "$branch" ]]; then
-    log "loop-guard: no CHANGE_BRANCH/BRANCH_NAME; treating as bot"
-    return 0
-  fi
-  [[ "$branch" == ${autofix_branch_prefix}* ]] && return 0
-  git log -1 --pretty=%B 2>/dev/null | grep -qx 'Cursor-Autofix: true' && return 0
-  return 1
-}
-
 # True if HEAD was produced by Phase E e2e quarantine push.
 # Optional ref (default HEAD): publish checks the fetched tip, not the checkout.
 is_e2e_flake_head() {
@@ -144,35 +86,8 @@ bitbucket_api_post() {
 }
 
 # ---------------------------------------------------------------------------
-# path gate  (mechanical enforcement of "minimal, in-scope" — not prose)
+# quarantine gate
 # ---------------------------------------------------------------------------
-# Files the fix must never touch. In [[ $p == $glob ]], '*' crosses '/', so a
-# single '*' already spans directories. Weakening a check to make it pass
-# (editing lint/format/build config, deleting the failing test, churning the
-# lockfile) is exactly what this list blocks.
-DENY_GLOBS=(
-  'ci/*' 'Jenkinsfile' '*/Jenkinsfile'
-  '.cursor/*' '*/.cursor/*'
-  '*.spec.ts' '*.spec.tsx' '*.test.ts' '*.test.tsx'
-  '*.e2e.ts' '*.e2e.tsx' '*.cy.ts' '*.cy.tsx' '*/e2e/*'
-  '.eslintrc' '.eslintrc.*' '*/.eslintrc' '*/.eslintrc.*'
-  'eslint.config.*' '*/eslint.config.*'
-  '.prettierrc' '.prettierrc.*' '*/.prettierrc' '*/.prettierrc.*'
-  '.prettierignore' '*/.prettierignore'
-  'nx.json'
-  'tsconfig.json' 'tsconfig.*.json' '*/tsconfig.json' '*/tsconfig.*.json'
-  'package-lock.json' 'yarn.lock' 'pnpm-lock.yaml' '*/package-lock.json'
-)
-
-is_denied_path() {
-  local p="$1" g
-  for g in "${DENY_GLOBS[@]}"; do
-    # shellcheck disable=SC2053  # unquoted $g intentional: glob match
-    [[ "$p" == $g ]] && return 0
-  done
-  return 1
-}
-
 # Print every file a patch touches (both sides of each diff header), deduped.
 # Pure bash: push-e2e-quarantine.sh calls this on the Jenkins agent, whose awk
 # is not the pinned one in the CI image.
@@ -185,24 +100,6 @@ patch_paths() {
     if [[ -n "$a" ]]; then printf '%s\n' "$a"; fi
     if [[ -n "$b" ]]; then printf '%s\n' "$b"; fi
   done <"$1" | sort -u
-}
-
-# Reject a patch that renames/copies files or touches any protected path.
-gate_patch() {
-  local patch="$1" bad=0 p
-  [[ -s "$patch" ]] || { log "gate: empty patch"; return 1; }
-  if grep -qE '^(rename|copy) (from|to) ' "$patch"; then
-    log "GATE FAIL: patch renames/copies files (not allowed for autofix)"
-    return 1
-  fi
-  while IFS= read -r p; do
-    [[ -z "$p" || "$p" == "/dev/null" ]] && continue
-    if is_denied_path "$p"; then
-      log "GATE FAIL: protected path in patch: $p"
-      bad=1
-    fi
-  done < <(patch_paths "$patch")
-  [[ "$bad" -eq 0 ]]
 }
 
 # Quarantine-only gate: exactly one expected *.cy.ts/*.cy.js path; signature-only
@@ -275,36 +172,4 @@ gate_e2e_quarantine_patch() {
     return 1
   fi
   return 0
-}
-
-# ---------------------------------------------------------------------------
-# working-tree hygiene
-# ---------------------------------------------------------------------------
-# "Clean" ignores ci-output.txt: Jenkins writes it into the repo root as an
-# untracked file on every run, so it must not count as a dirty tree.
-# Workspace-root E2E capture/isolation/quarantine artifacts (and ci-output.txt)
-# must survive restore/clean — Jenkins archives them after the failure post.
-_E2E_ARTIFACT_RE='[[:space:]](ci-output\.txt|e2e-failure\.env|e2e-isolation\.env|e2e-quarantine\.(patch|env))$'
-
-tree_is_clean() {
-  local dirty
-  dirty="$(git status --porcelain 2>/dev/null | grep -vE "$_E2E_ARTIFACT_RE" || true)"
-  [[ -z "$dirty" ]]
-}
-
-# Restore the tree to a known-good SHA. Uses -fd (NOT -fdx): -x would delete
-# ignored files such as node_modules, which is catastrophic in CI. ci-output.txt
-# and e2e-*.env / e2e-quarantine.* are preserved for Jenkins archive.
-# run.sh also calls this once at phase-1 start so Compile/postinstall noise
-# (untracked caches, etc.) is not swept into the autofix patch.
-restore_tree() {
-  local sha="$1"
-  git reset --hard "$sha" >/dev/null 2>&1 || true
-  git clean -fdq \
-    -e ci-output.txt \
-    -e e2e-failure.env \
-    -e e2e-isolation.env \
-    -e e2e-quarantine.patch \
-    -e e2e-quarantine.env \
-    >/dev/null 2>&1 || true
 }

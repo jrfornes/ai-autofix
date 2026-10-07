@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Local gate checks — no Cursor/Bitbucket network. Unit-tests the pure helpers
-# in lib.sh plus the skip behaviour of run.sh and the refuse-main guard.
+# Local checks for the E2E quarantine chain — no Bitbucket network, no Cypress.
+# Unit-tests lib.sh, drives parse/isolate/tag/publish against fixtures and
+# fakes, and runs the whole chain end to end.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-RUN="${SCRIPT_DIR}/run.sh"
 # shellcheck source=lib.sh
 source "${SCRIPT_DIR}/lib.sh"
 
@@ -26,65 +26,17 @@ assert_exit() {
   else bad "$name (exit $got, want $want)"; cat /tmp/av.out; fi
 }
 
-run_clean() {  # clear autofix env, then apply caller overrides
+run_clean() {  # clear publish env, then apply caller overrides
   env FAILED_STAGE= CHANGE_TARGET= CHANGE_BRANCH= CHANGE_ID= \
-      CURSOR_API_KEY= BITBUCKET_AUTOFIX_TOKEN= AI_AUTOFIX_MODE= \
-      AI_AUTOFIX_ARTIFACT_DIR= "$@"
+      BITBUCKET_AUTOFIX_TOKEN= AI_AUTOFIX_MODE= "$@"
 }
 
-echo "== stage eligibility =="
-T="eligible: Check Format"; check is_eligible_stage "Check Format"
-T="eligible: Lint";         check is_eligible_stage "Lint"
-T="ineligible: Build";      check not is_eligible_stage "Build"
-T="ineligible: Unit Tests"; check not is_eligible_stage "Unit Tests"
-T="ineligible: E2E Tests";  check not is_eligible_stage "E2E Tests"
-T="has deterministic: Lint";        check has_deterministic_fix "Lint"
-T="has deterministic: Check Format"; check has_deterministic_fix "Check Format"
-T="no deterministic: Unit Tests";   check not has_deterministic_fix "Unit Tests"
-
-echo "== path gate =="
-T="denied: spec file";   check is_denied_path "apps/foo/src/x.spec.ts"
-T="denied: eslintrc";    check is_denied_path "apps/foo/.eslintrc.json"
-T="denied: nested tsconfig"; check is_denied_path "libs/bar/tsconfig.json"
-T="denied: lockfile";    check is_denied_path "package-lock.json"
-T="denied: ci path";     check is_denied_path "ci/ai-autofix/run.sh"
-T="denied: e2e dir";     check is_denied_path "apps/foo-e2e/e2e/app.ts"
-T="allowed: source ts";  check not is_denied_path "apps/foo/src/app.ts"
-T="allowed: source html";check not is_denied_path "libs/ui/src/button.html"
-
-echo "== gate_patch =="
-GOOD="$(mktemp)"; BADP="$(mktemp)"; REN="$(mktemp)"
-cat >"$GOOD" <<'EOF'
-diff --git a/apps/foo/src/app.ts b/apps/foo/src/app.ts
-index 111..222 100644
---- a/apps/foo/src/app.ts
-+++ b/apps/foo/src/app.ts
-@@ -1 +1 @@
--const x=1
-+const x = 1;
-EOF
-cat >"$BADP" <<'EOF'
-diff --git a/.eslintrc.json b/.eslintrc.json
-index 111..222 100644
---- a/.eslintrc.json
-+++ b/.eslintrc.json
-@@ -1 +1 @@
--{"rules":{"eqeqeq":"error"}}
-+{"rules":{}}
-EOF
-cat >"$REN" <<'EOF'
-diff --git a/apps/foo/src/a.ts b/apps/foo/src/b.ts
-similarity index 100%
-rename from apps/foo/src/a.ts
-rename to apps/foo/src/b.ts
-EOF
-T="gate accepts clean source patch"; check gate_patch "$GOOD"
-T="gate rejects config patch";       check not gate_patch "$BADP"
-T="gate rejects rename patch";        check not gate_patch "$REN"
-T="patch_paths extracts file"
-if patch_paths "$GOOD" | grep -qx apps/foo/src/app.ts; then ok "$T"; else bad "$T"; fi
-T="patch_paths: both rename sides, ignores indented/added headers, no final newline"
+echo "== patch_paths =="
 PP="$(mktemp)"
+printf '%s\n' 'diff --git a/apps/foo/src/app.ts b/apps/foo/src/app.ts' 'index 111..222 100644' >"$PP"
+T="patch_paths extracts file"
+if [[ "$(patch_paths "$PP")" == "apps/foo/src/app.ts" ]]; then ok "$T"; else bad "$T"; fi
+T="patch_paths: both rename sides, ignores indented/added headers, no final newline"
 printf '%s\n' \
   'diff --git a/apps/foo/src/a.ts b/apps/foo/src/b.ts' \
   ' diff --git a/context/line b/context/line' \
@@ -92,7 +44,7 @@ printf '%s\n' \
 printf '%s' 'diff --git a/b/odd.ts b/b/odd.ts' >>"$PP"
 if [[ "$(patch_paths "$PP" | paste -sd, -)" == "apps/foo/src/a.ts,apps/foo/src/b.ts,b/odd.ts" ]]; then ok "$T"
 else bad "$T"; patch_paths "$PP"; fi
-rm -f "$GOOD" "$BADP" "$REN" "$PP"
+rm -f "$PP"
 
 echo "== loop guard (needs a repo) =="
 TMPREPO="$(mktemp -d)"
@@ -100,56 +52,26 @@ TMPREPO="$(mktemp -d)"
   cd "$TMPREPO"
   git init -q; git config user.email t@t; git config user.name t
   echo hi >f; git add f; git commit -qm "normal work"
-  # normal branch, normal message -> not a bot
-  CHANGE_BRANCH="feature/x" bash -c "source '${SCRIPT_DIR}/lib.sh'; is_bot_change" && exit 20 || true
-  # bot branch name -> bot
-  CHANGE_BRANCH="cursor/ci-autofix-9-lint" bash -c "source '${SCRIPT_DIR}/lib.sh'; is_bot_change" || exit 21
-  # empty branch (unknown ref) -> fail safe to bot
-  CHANGE_BRANCH="" BRANCH_NAME="" bash -c "source '${SCRIPT_DIR}/lib.sh'; is_bot_change" || exit 22
-  # bot commit trailer -> bot
-  git commit -q --allow-empty -m "x
-
-Cursor-Autofix: true"
-  CHANGE_BRANCH="feature/x" bash -c "source '${SCRIPT_DIR}/lib.sh'; is_bot_change" || exit 23
-  # e2e-flake trailer + [cursor-autofix] subject -> NOT Format/Lint bot
+  bash -c "source '${SCRIPT_DIR}/lib.sh'; is_e2e_flake_head" && exit 20
   git commit -q --allow-empty -m "chore(e2e): [cursor-autofix] quarantine title as @flaky
 
 Cursor-Autofix: e2e-flake"
-  CHANGE_BRANCH="feature/x" bash -c "source '${SCRIPT_DIR}/lib.sh'; is_bot_change" && exit 24 || true
-  CHANGE_BRANCH="feature/x" bash -c "source '${SCRIPT_DIR}/lib.sh'; is_e2e_flake_head" || exit 25
+  bash -c "source '${SCRIPT_DIR}/lib.sh'; is_e2e_flake_head" || exit 21
+  bash -c "source '${SCRIPT_DIR}/lib.sh'; is_e2e_flake_head HEAD~1" && exit 22
+  exit 0
 )
 case $? in
-  0)  ok "loop guard: normal / bot-branch / unknown / trailer / e2e-flake" ;;
-  20) bad "loop guard: normal change misclassified as bot" ;;
-  21) bad "loop guard: bot branch not detected" ;;
-  22) bad "loop guard: unknown ref not treated as bot" ;;
-  23) bad "loop guard: bot trailer not detected" ;;
-  24) bad "loop guard: e2e-flake misclassified as Format/Lint bot" ;;
-  25) bad "loop guard: is_e2e_flake_head missed e2e-flake trailer" ;;
+  0)  ok "loop guard: is_e2e_flake_head on HEAD and on an explicit ref" ;;
+  20) bad "loop guard: normal commit treated as e2e-flake" ;;
+  21) bad "loop guard: is_e2e_flake_head missed e2e-flake trailer" ;;
+  22) bad "loop guard: explicit ref ignored" ;;
   *)  bad "loop guard: unexpected error" ;;
 esac
 rm -rf "$TMPREPO"
 
-echo "== run.sh skip gates =="
-assert_exit "skip when FAILED_STAGE unset" 0 \
-  run_clean CHANGE_TARGET=main "$RUN"
-assert_exit "skip ineligible stage (E2E)" 0 \
-  run_clean FAILED_STAGE="E2E Tests" CHANGE_TARGET=main "$RUN"
-assert_exit "skip ineligible stage (Unit Tests)" 0 \
-  run_clean FAILED_STAGE="Unit Tests" CHANGE_TARGET=main "$RUN"
-assert_exit "skip ineligible stage (Build)" 0 \
-  run_clean FAILED_STAGE="Build" CHANGE_TARGET=main "$RUN"
-assert_exit "skip when mode=off" 0 \
-  run_clean FAILED_STAGE="Lint" CHANGE_TARGET=main AI_AUTOFIX_MODE=off "$RUN"
-assert_exit "skip when CHANGE_TARGET unset" 0 \
-  run_clean FAILED_STAGE="Lint" "$RUN"
-
 echo "== publish guards =="
-assert_exit "refuse PR into main" 1 \
-  run_clean CHANGE_BRANCH=main FAILED_STAGE=Lint AUTOFIX_PATHS=x \
-    BITBUCKET_AUTOFIX_TOKEN=x "${SCRIPT_DIR}/open-bitbucket-pr.sh" /etc/hostname
 assert_exit "comment requires CHANGE_ID" 1 \
-  run_clean BITBUCKET_AUTOFIX_TOKEN=x FAILED_STAGE=Lint \
+  run_clean BITBUCKET_AUTOFIX_TOKEN=x FAILED_STAGE="E2E Tests" \
     "${SCRIPT_DIR}/comment-bitbucket-pr.sh" /etc/hostname
 assert_exit "push-e2e refuse main" 1 \
   run_clean CHANGE_BRANCH=main AUTOFIX_PATHS=apps/x/src/e2e/a.cy.ts \
@@ -168,8 +90,6 @@ T="push script uses e2e-flake trailer";
 check bash -c "grep -q 'Cursor-Autofix: e2e-flake' '${SCRIPT_DIR}/push-e2e-quarantine.sh'"
 T="comment body mentions quarantine for e2e-flake";
 check bash -c "grep -q 'quarantine as' '${SCRIPT_DIR}/comment-bitbucket-pr.sh'"
-T="is_bot_change body has no [cursor-autofix] substring match";
-check bash -c "! awk '/^is_bot_change\\(\\)/,/^}/' '${SCRIPT_DIR}/lib.sh' | grep -q '\\[cursor-autofix\\]'"
 
 echo "== bitbucket repo + token handling (E-1, E-5) =="
 bb_repo_in() {  # ORIGIN_URL [VAR=VALUE...] → bitbucket_repo output from a repo with that origin
@@ -278,67 +198,6 @@ assert_exit "push: second run exits 0" 0 push_run
 T="push: loop guard reads the fetched tip, not local HEAD"
 check bash -c "[[ '$(remote_tip)' == '$tip_after' ]] && grep -q 'already has Cursor-Autofix' /tmp/av.out"
 rm -rf "$PUSH_TMP" "$SHIM_BIN"; rm -f "$ARGV_LOG" "$CURL_STDIN" "$CURL_DATA"
-
-echo "== publish.sh exports sourced artifact env (exec boundary) =="
-PUB_META="$(mktemp)"; PUB_CHILD="$(mktemp)"
-cat >"$PUB_META" <<'EOF'
-AUTOFIX_SOURCE=deterministic
-AUTOFIX_PATCH=/tmp/does-not-need-to-exist-for-this-check
-AUTOFIX_PATHS=apps/foo/src/app.ts
-AI_AUTOFIX_MODE=plan
-EOF
-cat >"$PUB_CHILD" <<'EOF'
-#!/usr/bin/env bash
-# Mimic open-bitbucket-pr.sh / comment-bitbucket-pr.sh: only see exported env.
-[[ -n "${AUTOFIX_PATHS:-}" ]] || exit 11
-[[ "${AUTOFIX_SOURCE:-}" == "deterministic" ]] || exit 12
-exit 0
-EOF
-chmod +x "$PUB_CHILD"
-# Reproduce publish.sh: set -a; source; set +a; exec child
-assert_exit "sourced autofix.env reaches exec child" 0 \
-  bash -c 'set -a; source "$1"; set +a; exec "$2"' _ "$PUB_META" "$PUB_CHILD"
-# Prove the bug mode still fails (non-exported source)
-assert_exit "non-exported source does not reach exec child" 11 \
-  bash -c 'source "$1"; exec "$2"' _ "$PUB_META" "$PUB_CHILD"
-rm -f "$PUB_META" "$PUB_CHILD"
-
-echo "== open-pr path fallback from patch =="
-FALLBACK_PATCH="$(mktemp)"
-cat >"$FALLBACK_PATCH" <<'EOF'
-diff --git a/apps/foo/src/app.ts b/apps/foo/src/app.ts
-index 111..222 100644
---- a/apps/foo/src/app.ts
-+++ b/apps/foo/src/app.ts
-@@ -1 +1 @@
--const x=1
-+const x = 1;
-EOF
-# Empty AUTOFIX_PATHS + valid patch: path fallback succeeds, then refuse main
-assert_exit "open-pr derives paths when AUTOFIX_PATHS unset (still refuses main)" 1 \
-  run_clean CHANGE_BRANCH=main FAILED_STAGE=Lint AUTOFIX_PATHS= \
-    BITBUCKET_AUTOFIX_TOKEN=x "${SCRIPT_DIR}/open-bitbucket-pr.sh" "$FALLBACK_PATCH"
-# Contentful file with no diff --git headers → cannot derive paths
-assert_exit "open-pr dies when patch has no paths" 1 \
-  run_clean CHANGE_BRANCH=feature/x FAILED_STAGE=Lint AUTOFIX_PATHS= \
-    BITBUCKET_AUTOFIX_TOKEN=x "${SCRIPT_DIR}/open-bitbucket-pr.sh" /etc/hostname
-rm -f "$FALLBACK_PATCH"
-
-echo "== source markers / config sanity =="
-T="loop markers present in open-pr";
-check bash -c "grep -q '\[cursor-autofix\]' '${SCRIPT_DIR}/open-bitbucket-pr.sh' && grep -q 'Cursor-Autofix: true' '${SCRIPT_DIR}/open-bitbucket-pr.sh'"
-T="no 'git add -A' in open-pr (scoped staging)";
-check bash -c "! grep -q 'git add -A' '${SCRIPT_DIR}/open-bitbucket-pr.sh'"
-T="cli config denies Shell";
-check bash -c "grep -q 'Shell' '${SCRIPT_DIR}/cursor-cli-config.json'"
-T="run.sh has no agent tier fallthrough";
-check bash -c "! grep -q 'agent-fix.sh' '${SCRIPT_DIR}/run.sh'"
-for stage in "Check Format" "Lint"; do
-  T="verify map covers ${stage}"; check bash -c "grep -Fq '\"${stage}\"' '${SCRIPT_DIR}/lib.sh'"
-done
-for stage in "Unit Tests" "Build"; do
-  T="verify map omits ${stage}"; check bash -c "! grep -Fq '\"${stage}\"' '${SCRIPT_DIR}/lib.sh'"
-done
 
 echo "== parse-e2e-failure.sh =="
 PARSE="${SCRIPT_DIR}/parse-e2e-failure.sh"

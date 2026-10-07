@@ -24,7 +24,7 @@ pipeline {
         booleanParam(
             name: 'ENABLE_AI_AUTOFIX',
             defaultValue: false,
-            description: 'On format/lint/unit/build failure, run CI auto-fix (never auto-merges)'
+            description: 'On E2E Tests failure, publish the @flaky quarantine candidate (never auto-merges)'
         )
         booleanParam(
             name: 'SKIP_E2E_ISOLATION',
@@ -39,7 +39,7 @@ pipeline {
         choice(
             name: 'AI_AUTOFIX_MODE',
             choices: ['plan', 'apply', 'off'],
-            description: 'plan = comment verified diff; apply = open sibling PR into CHANGE_BRANCH; off = disabled'
+            description: 'plan = comment the quarantine diff on the PR; apply = commit it onto CHANGE_BRANCH; off = disabled'
         )
     }
     
@@ -56,7 +56,6 @@ pipeline {
         CYPRESS_VERIFY_TIMEOUT = "100000"
         NX_PARALLEL_E2E = "2"
         NODE_OPTIONS = "--max_old_space_size=8192"
-        AI_AUTOFIX_ARTIFACT_DIR = "${WORKSPACE}/../ai-autofix-${BUILD_NUMBER}"
     }
     
     stages {
@@ -336,69 +335,14 @@ pipeline {
                     } else {
                         echo '[ai-autofix] E2E quarantine artifacts missing; nothing to publish'
                     }
-                    return
-                }
-
-                def eligible = ['Check Format', 'Lint']
-                if (!eligible.contains(env.FAILED_STAGE)) {
-                    echo "AI autofix skipped: stage '${env.FAILED_STAGE}' is not eligible"
-                    return
-                }
-                if (!env.DOCKER_IMAGE) {
-                    echo 'AI autofix skipped: DOCKER_IMAGE not set'
-                    return
-                }
-
-                def failed = env.FAILED_STAGE
-                def artifactDir = env.AI_AUTOFIX_ARTIFACT_DIR
-                def dockerArgs = "--privileged --ipc=host -v ${artifactDir}:${artifactDir}"
-
-                try {
-                    sh "mkdir -p '${artifactDir}'"
-
-                    // Phase A: deterministic Format/Lint only — no Cursor credential
-                    withEnv([
-                        "FAILED_STAGE=${failed}",
-                        "AI_AUTOFIX_MODE=${params.AI_AUTOFIX_MODE}",
-                        "AI_AUTOFIX_ARTIFACT_DIR=${artifactDir}"
-                    ]) {
-                        catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
-                            docker.image(env.DOCKER_IMAGE).inside(dockerArgs) {
-                                sh 'chmod +x ci/ai-autofix/*.sh && ./ci/ai-autofix/run.sh'
-                            }
-                        }
-                    }
-
-                    if (fileExists("${artifactDir}/autofix.env")) {
-                        withCredentials([string(credentialsId: 'acme-ui-bitbucket-token', variable: 'BITBUCKET_AUTOFIX_TOKEN')]) {
-                            withEnv([
-                                "FAILED_STAGE=${failed}",
-                                "AI_AUTOFIX_MODE=${params.AI_AUTOFIX_MODE}",
-                                "AI_AUTOFIX_ARTIFACT_DIR=${artifactDir}"
-                            ]) {
-                                catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
-                                    docker.image(env.DOCKER_IMAGE).inside(dockerArgs) {
-                                        sh './ci/ai-autofix/publish.sh'
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        echo '[ai-autofix] no verified patch produced; nothing to publish'
-                    }
-                } catch (Exception e) {
-                    echo "AI autofix skipped: ${e.message}"
                 }
             }
         }
-        // cleanup runs after failure/success so autofix still has the checkout
+        // cleanup runs after failure/success so the E2E chain still has the checkout
         cleanup {
             script {
                 deleteDir()
                 try {
-                    if (env.AI_AUTOFIX_ARTIFACT_DIR) {
-                        dir(env.AI_AUTOFIX_ARTIFACT_DIR) { deleteDir() }
-                    }
                     dir("${workspace}@tmp") { deleteDir() }
                     dir("${workspace}@script") { deleteDir() }
                     dir("${workspace}@script@tmp") { deleteDir() }
