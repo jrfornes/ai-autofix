@@ -117,11 +117,9 @@ pipeline {
         stage('Check Format') {
             steps {
                 script {
-                    helpers.runCaptured(
-                        'Check Format',
-                        'npx nx format:check --base origin/"${CHANGE_TARGET}" --head HEAD',
-                        204800
-                    )
+                    docker.image(env.DOCKER_IMAGE).inside('--privileged --ipc=host') {
+                        sh 'npx nx format:check --base origin/"${CHANGE_TARGET}" --head HEAD'
+                    }
                 }
             }
         }
@@ -129,11 +127,9 @@ pipeline {
         stage('Lint') {
             steps {
                 script {
-                    helpers.runCaptured(
-                        'Lint',
-                        'npx nx affected --target=lint --base origin/"${CHANGE_TARGET}"',
-                        204800
-                    )
+                    docker.image(env.DOCKER_IMAGE).inside('--privileged --ipc=host') {
+                        sh 'npx nx affected --target=lint --base origin/"${CHANGE_TARGET}"'
+                    }
                 }
             }
         }
@@ -141,11 +137,9 @@ pipeline {
         stage('Unit Tests') {
             steps {
                 script {
-                    helpers.runCaptured(
-                        'Unit Tests',
-                        'npx nx affected --target=test --base origin/"${CHANGE_TARGET}"',
-                        204800
-                    )
+                    docker.image(env.DOCKER_IMAGE).inside('--privileged --ipc=host') {
+                        sh 'npx nx affected --target=test --base origin/"${CHANGE_TARGET}"'
+                    }
                 }
             }
         }
@@ -196,11 +190,9 @@ pipeline {
         stage('Build') {
             steps {
                 script {
-                    helpers.runCaptured(
-                        'Build',
-                        'npx nx affected --target=build --prod --base origin/"${CHANGE_TARGET}" --exclude=bugs-index,acme-app-proxy-server',
-                        204800
-                    )
+                    docker.image(env.DOCKER_IMAGE).inside('--privileged --ipc=host') {
+                        sh 'npx nx affected --target=build --prod --base origin/"${CHANGE_TARGET}" --exclude=bugs-index,acme-app-proxy-server'
+                    }
                 }
             }
         }

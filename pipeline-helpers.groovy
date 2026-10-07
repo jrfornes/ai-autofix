@@ -8,8 +8,8 @@
 def runCaptured(String stageName, String command, int captureBytes) {
     try {
         docker.image(env.DOCKER_IMAGE).inside('--privileged --ipc=host') {
-            // Capture truncated stdout/stderr to ci-output.txt for AI autofix /
-            // E2E identity parse; keep cmd exit status.
+            // Capture truncated stdout/stderr to ci-output.txt for the E2E
+            // identity parse; keep cmd exit status.
             sh '''#!/usr/bin/env bash
                 set -uo pipefail
                 ''' + command + ''' 2>&1 | tee /tmp/ci-stage-out.txt
