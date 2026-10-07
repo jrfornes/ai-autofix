@@ -71,8 +71,12 @@ rm -rf "$TMPREPO"
 
 echo "== publish guards =="
 assert_exit "comment requires CHANGE_ID" 1 \
-  run_clean BITBUCKET_AUTOFIX_TOKEN=x FAILED_STAGE="E2E Tests" \
+  run_clean BITBUCKET_AUTOFIX_TOKEN=x FAILED_STAGE="E2E Tests" AUTOFIX_SOURCE=e2e-flake \
     "${SCRIPT_DIR}/comment-bitbucket-pr.sh" /etc/hostname
+assert_exit "comment refuses a non-e2e-flake source" 1 \
+  run_clean BITBUCKET_AUTOFIX_TOKEN=x CHANGE_ID=7 BITBUCKET_WORKSPACE=ws BITBUCKET_REPO_SLUG=slug \
+    AUTOFIX_SOURCE=deterministic "${SCRIPT_DIR}/comment-bitbucket-pr.sh" /etc/hostname
+T="comment refusal names the source"; check grep -q "AUTOFIX_SOURCE must be e2e-flake" /tmp/av.out
 assert_exit "push-e2e refuse main" 1 \
   run_clean CHANGE_BRANCH=main AUTOFIX_PATHS=apps/x/src/e2e/a.cy.ts \
     BITBUCKET_AUTOFIX_TOKEN=x E2E_TITLE=t \

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Post the gated diff as a comment on the failing PR (plan mode — nothing is
-# pushed). Invoked by the Jenkinsfile (E2E quarantine) and publish.sh
-# (Format/Lint). Reads artifact metadata from the already-sourced environment.
+# Post the gated @flaky quarantine diff as a comment on the failing PR (plan
+# mode — nothing is pushed). Invoked by the Jenkinsfile with e2e-quarantine.env
+# already sourced into the environment.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,7 +17,7 @@ command -v jq >/dev/null 2>&1 || die "jq required to build comment JSON"
 REPO="$(bitbucket_repo)" || die "Bitbucket repository unknown"
 API_BASE="${BITBUCKET_API_URL:-https://api.bitbucket.org/2.0}"
 STAGE="${FAILED_STAGE:-unknown}"
-SOURCE="${AUTOFIX_SOURCE:-agent}"
+[[ "${AUTOFIX_SOURCE:-}" == "e2e-flake" ]] || die "AUTOFIX_SOURCE must be e2e-flake (got '${AUTOFIX_SOURCE:-}')"
 # Inline the diff only below this; an oversized body is a 4xx and no comment.
 MAX_PATCH_BYTES="${MAX_PATCH_BYTES:-32768}"
 
@@ -30,32 +30,25 @@ evidence_line() {  # LABEL VALUE — skipped when the verdict did not record it
 }
 
 {
-  echo "## Cursor CI auto-fix (plan mode)"
+  echo "## CI E2E flaky-test quarantine (plan mode)"
   echo
-  if [[ "$SOURCE" == "e2e-flake" ]]; then
-    echo "Stage \`${STAGE}\` failed. Isolated re-run of the failing test passed;"
-    echo "below is a candidate **quarantine as \`@flaky\`** (${SOURCE}) so PR E2E"
-    echo "(\`-@flaky\`) skips it. It has **not** been pushed; apply it yourself if"
-    echo "it looks right."
-    echo
-    echo "**Evidence**"
-    echo
-    evidence_line "Test" "\`${E2E_TITLE:-unknown}\`"
-    evidence_line "Spec" "\`${E2E_PROJECT:-?}/${E2E_SPEC:-?}\`"
-    evidence_line "Browser" "${ISOLATION_BROWSER:-}"
-    evidence_line "Tests executed" "${ISOLATION_MATCHED:-}"
-    evidence_line "Re-runs" "${ISOLATION_ATTEMPTS:-}"
-    evidence_line "Duration" "${ISOLATION_DURATION_S:+${ISOLATION_DURATION_S}s}"
-    evidence_line "Command" "${ISOLATION_ARGV:+\`${ISOLATION_ARGV}\`}"
-    echo
-    echo "A test passing alone is consistent with flakiness, but equally with"
-    echo "order dependence, resource contention, or a real bug that does not"
-    echo "reproduce in isolation. This is a judgement, not a proof."
-  else
-    echo "Stage \`${STAGE}\` failed. Below is a candidate fix (${SOURCE}) that CI"
-    echo "**applied to a clean tree and re-verified** — the ${STAGE} check passes"
-    echo "with it. It has **not** been pushed; apply it yourself if it looks right."
-  fi
+  echo "Stage \`${STAGE}\` failed. Isolated re-run of the failing test passed;"
+  echo "below is a candidate **quarantine as \`@flaky\`** so PR E2E (\`-@flaky\`)"
+  echo "skips it. It has **not** been pushed; apply it yourself if it looks right."
+  echo
+  echo "**Evidence**"
+  echo
+  evidence_line "Test" "\`${E2E_TITLE:-unknown}\`"
+  evidence_line "Spec" "\`${E2E_PROJECT:-?}/${E2E_SPEC:-?}\`"
+  evidence_line "Browser" "${ISOLATION_BROWSER:-}"
+  evidence_line "Tests executed" "${ISOLATION_MATCHED:-}"
+  evidence_line "Re-runs" "${ISOLATION_ATTEMPTS:-}"
+  evidence_line "Duration" "${ISOLATION_DURATION_S:+${ISOLATION_DURATION_S}s}"
+  evidence_line "Command" "${ISOLATION_ARGV:+\`${ISOLATION_ARGV}\`}"
+  echo
+  echo "A test passing alone is consistent with flakiness, but equally with"
+  echo "order dependence, resource contention, or a real bug that does not"
+  echo "reproduce in isolation. This is a judgement, not a proof."
   echo
   patch_bytes="$(wc -c <"$PATCH" | tr -d ' ')"
   if [[ "$patch_bytes" -le "$MAX_PATCH_BYTES" ]]; then
