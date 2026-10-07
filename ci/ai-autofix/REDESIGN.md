@@ -104,6 +104,10 @@ become central:
 
 ### Removal inventory
 
+**Done 2026-10-07 (Stage 1, after S0 confirmed no users).** Everything below
+was removed as listed, including the `lib.sh` functions and the Format/Lint
+tail of the `Jenkinsfile`.
+
 Deleted outright:
 
 | File                     | Why                                         |
@@ -231,7 +235,10 @@ the real status is recovered from `PIPESTATUS[0]`.
 ### Actions
 
 - **P0-1.** Instrument only the E2E Tests stage; plain `sh` elsewhere.
-- **P0-2.** Write the capture outside the working tree and delete the
+  *Done 2026-10-07.*
+- **P0-2.** *Half done 2026-10-07: Stage 1 deleted every exclusion list
+  (`_E2E_ARTIFACT_RE`, `restore_tree`, `run.sh`'s filters and pathspec); the
+  capture is still written to the repo root.* Write the capture outside the working tree and delete the
   exclusion lists that exist only to tolerate it in the repo root.
 - **P0-3.** Switch to a line-safe tail, or document why byte truncation is
   acceptable.
@@ -747,9 +754,9 @@ easier to state and to check than what exists today.
 
 ### Actions
 
-Status 2026-10-06: E-1, E-3, E-4, E-5 done; E-6 done except dropping the
-Format/Lint wording, which waits for Stage 1. E-2 and E-7 are Stage 6; E-8 waits
-on the noise question below.
+Status 2026-10-07: E-1, E-3, E-4, E-5 and E-6 done (the Format/Lint wording
+went with Stage 1). E-2 and E-7 are Stage 6; E-8 waits on the noise question
+below.
 
 - **E-1.** Get the token out of process arguments in both paths.
 - **E-2.** Apply mode comments as well as pushes, quoting the C-3 evidence and
@@ -947,13 +954,13 @@ rediscovers them and treats them as work.
   Not true — checked on 2026-09-30. The sample reads
   `src/e2e/module-a/local/products.cy.ts`, de-branded in `9365aa6`, which
   predates this document; it matches the dry-run assertions. Nothing to do.
-- The `ENABLE_AI_AUTOFIX` parameter description in the `Jenkinsfile` says "On
-  format/lint/unit/build failure" — wrong before the pivot, and now wrong in a
-  second way. Fold into the renaming discussion above.
+- ~~The `ENABLE_AI_AUTOFIX` parameter description in the `Jenkinsfile` says "On
+  format/lint/unit/build failure".~~ Rewritten in Stage 1, with
+  `AI_AUTOFIX_MODE`'s. The names themselves wait for the Stage 6 rename.
 - The `Jenkinsfile` loads `ci/pipeline-helpers.groovy`, but in this repo the
   file sits at the root. Confirm the real location in the monorepo.
-- `README.md` documents Phases A–E as built and will need rewriting once the
-  pivot lands.
+- ~~`README.md` documents Phases A–E as built and will need rewriting once the
+  pivot lands.~~ Rewritten in Stage 1 for the E2E-only system.
 - ~~`Jenkinsfile:167` — `params.SKIP_E2E_FLAKY_TESTS ?: true` makes the
   `E2E Tests - Flaky` stage unrunnable regardless of the parameter.~~ Fixed in
   Stage 0 with a null-safe check. The default is still `true`, so the flaky
@@ -990,3 +997,4 @@ rediscovers them and treats them as work.
 | 2026-10-06 | C     | C-3/C-4/C-6 landed. Verdict counts executed tests (Passing + Failing), not `Tests:` — the old guard passed a grep that matched nothing whenever filtered tests were reported Pending. New `multi_match` verdict; evidence (browser, counts, duration, argv) recorded and carried into `e2e-quarantine.env`. Layout lives in `lib.sh` (`E2E_PROJECTS_DIR`, `e2e_spec_path`). |
 | 2026-10-06 | x-cut | A11 and the `%q` round-trip check landed as one harness section: a hostile title runs through the real parse → isolate → tag → gate chain and must source back byte-identical from every `.env`. Verified to fail when `%q` is dropped from any single producer. |
 | 2026-10-06 | E     | E-1/E-3/E-4/E-5/E-6 landed. Token reaches `curl` via a stdin config and `git` via a `GIT_CONFIG_*` header (git ≥ 2.31, refused otherwise); fetch uses the push URL; loop guard checks the fetched tip; workspace/slug explicit or derived from `origin`, never defaulted; comments use `jq`, a `mktemp` response, a 32 KiB inline cap, and quote the isolation evidence with a "judgement, not proof" caveat. Unverified on the real agent: git version, `jq` presence, and that `origin` is a bitbucket.org URL. |
+| 2026-10-07 | all   | **Stage 1 landed: Format/Lint deleted** after S0 confirmed no users. Six files gone, `lib.sh` down to the quarantine helpers, `Jenkinsfile` Format/Lint tail removed, harness 123 → 86 checks. `comment-bitbucket-pr.sh` is e2e-flake only (rest of E-6). P0-1: only E2E Tests is captured. README rewritten. |

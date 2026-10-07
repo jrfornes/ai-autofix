@@ -1,125 +1,101 @@
-# CI auto-fix
+# CI E2E flaky-test quarantine
 
-Automatically proposes a fix when Check Format or Lint fails, then either
-comments the fix on the PR (default) or opens a PR into the feature branch.
+When the `E2E Tests` stage fails on a PR, decide whether the failing test is
+flaky and, if the evidence supports it, propose quarantining it as `@flaky` —
+as a PR comment (`plan`, the default) or a commit on the feature branch
+(`apply`). Nothing ever auto-merges. There is no AI on the live path; the
+directory and parameter names predate the 2026-09-28 pivot (see
+`REDESIGN.md`).
 
-**Phase A:** Format/Lint via deterministic fixers only (`nx format:write` /
-`lint --fix`). No Cursor agent on the live Jenkins path. Unit Tests, Build,
-and E2E are not autofixed. `agent-fix.sh` / `PROMPT.md` / `cursor-cli-config.json`
-remain in tree but are parked unused.
+A quarantined test still runs in the tolerant `E2E Tests - Flaky` stage when
+`SKIP_E2E_FLAKY_TESTS` is unticked; it is off by default.
 
-**Phase B:** On `E2E Tests` failure only, always capture stdout (2 MiB), parse
-with `parse-e2e-failure.sh`, and archive `ci-output.txt` + `e2e-failure.env`
-(`E2E_PROJECT` / `E2E_SPEC` / `E2E_TITLE`) when unambiguous. Not autofix-eligible.
+**Every output is a judgement, not a proof.** A test that passes when re-run
+alone is consistent with flakiness, but equally with order dependence,
+resource contention, or a real bug that does not reproduce in isolation. The
+system records what it re-ran so a human can judge.
 
-**Phase C:** When `e2e-failure.env` exists, re-run that one test via
-`isolate-e2e-failure.sh` (`nx --spec` + escaped `--env.grep` + `-@flaky`) and
-archive `e2e-isolation.env`. Verdict is `pass` only when exactly one test
-executed (Passing + Failing from the Cypress results table) and it passed;
-zero is `no_match`, more than one is `multi_match`. The file also records the
-evidence: browser, counts, duration and exact argv. Kill switch:
-`SKIP_E2E_ISOLATION`. Still not autofix-eligible; no push.
+## The chain
 
-**Phase D:** On isolation `pass`, `tag-e2e-flaky.sh` / `.mjs` adds `@flaky` to the
-matching leaf `it`, gates the single-file diff (`gate_e2e_quarantine_patch`), and
-archives `e2e-quarantine.patch` + `e2e-quarantine.env`. Kill switch:
-`SKIP_E2E_QUARANTINE`. No remote push until Phase E.
+Each phase is gated on the previous one producing its artifact, so any phase
+that cannot decide stops everything downstream.
 
-**Phase E:** When quarantine artifacts exist and `ENABLE_AI_AUTOFIX` is on:
-`plan` comments the diff; `apply` commits on `CHANGE_BRANCH` tip via
-`push-e2e-quarantine.sh` (trailer `Cursor-Autofix: e2e-flake`, no force, no
-sibling PR). Format/Lint still uses `publish.sh` + `open-bitbucket-pr.sh`.
+| Phase | Script                     | Runs in  | Produces                                  |
+| ----- | -------------------------- | -------- | ----------------------------------------- |
+| 0     | `runCaptured` (Jenkinsfile) | CI image | `ci-output.txt` (2 MiB tail), `FAILED_STAGE` |
+| B     | `parse-e2e-failure.sh`     | CI image | `e2e-failure.env`                         |
+| C     | `isolate-e2e-failure.sh`   | CI image | `e2e-isolation.env`                       |
+| D     | `tag-e2e-flaky.sh` / `.mjs` | CI image | `e2e-quarantine.patch` + `.env`           |
+| E     | `comment-bitbucket-pr.sh` / `push-e2e-quarantine.sh` | agent | PR comment or commit |
 
-## Design in one line
+- **B — identity.** Scrapes the Cypress/Nx log for `E2E_PROJECT`, `E2E_SPEC`
+  and `E2E_TITLE`. First failure wins. Anything ambiguous exits 1 with no file.
+- **C — isolation.** Re-runs that one test with `nx run <project>:e2e --spec`,
+  an escaped `--env.grep` and `--env.grepTags=-@flaky`. The verdict is `pass`
+  only when exactly one test executed (Passing + Failing from the Cypress
+  results table) and passed; zero is `no_match`, more than one is
+  `multi_match`; also `fail`, `error`, `skipped`, `dry-run`. The verdict file
+  records the evidence: browser, counts, duration and exact argv. Kill switch
+  `SKIP_E2E_ISOLATION`.
+- **D — quarantine patch.** On `pass`, adds `tags: ['@flaky']` to the matching
+  leaf `it()`, aborting on template-literal titles, duplicates, or an existing
+  `@flaky`. The single-file diff must clear `gate_e2e_quarantine_patch`. Kill
+  switch `SKIP_E2E_QUARANTINE`.
+- **E — publish**, only when `ENABLE_AI_AUTOFIX` is on and
+  `AI_AUTOFIX_MODE` is not `off`. `plan` comments the diff with the evidence;
+  `apply` re-gates it, commits it onto the `CHANGE_BRANCH` tip with trailer
+  `Cursor-Autofix: e2e-flake`, and pushes — never force, never main/master,
+  staging only the gated path, skipping if the tip already carries the trailer.
 
-Phase 1 produces a **verified patch**. Jenkins owns git, Bitbucket, and every
-credential. No model runs on the live path in Phase A.
+## Credential boundary
 
-## Two phases, one credential boundary
+Phases 0–D run in the CI image with no token. Phase E is the only credentialed
+step and runs on the agent, never in the container. Every value the chain
+emits is written with `printf %q`, because Phase E `source`s
+`e2e-quarantine.env` in the shell that holds the token and `E2E_TITLE` is
+PR-author controlled; the harness enforces this with a hostile-title round
+trip.
 
-```
-stage fails
-   │
-   ▼
-PHASE 1  run.sh          ← NO Bitbucket token, NO Cursor key, no git remote
-   ├─ gates (eligible stage, loop guard, …)
-   ├─ restore to HEAD     (drop Compile/postinstall noise; then require clean)
-   ├─ Tier 0: deterministic fix   (nx format:write / lint --fix)
-   ├─ path gate                   (reject edits to tests/config/CI/lockfiles)
-   ├─ verify                      (re-run the REAL stage check on a clean tree)
-   └─ emit artifact: autofix.patch + autofix.env
-   │
-   ▼
-PHASE 2  publish.sh      ← Bitbucket token only (Format/Lint)
-   ├─ plan  → comment the verified diff on the PR
-   └─ apply → open a PR into CHANGE_BRANCH (never main/master)
-
-E2E B→D (always on E2E failure) then Phase E publish when ENABLE_AI_AUTOFIX:
-   plan  → comment-bitbucket-pr.sh e2e-quarantine.patch
-   apply → push-e2e-quarantine.sh (CHANGE_BRANCH tip, Cursor-Autofix: e2e-flake)
-```
-
-The phases are separate Jenkins steps. Only the publish step gets the
-Bitbucket credential (see `Jenkinsfile`).
-
-## Why deterministic only (Phase A)
-
-Most "Check Format" and a large share of "Lint" failures are fixable with a pure
-formatter/linter command — reproducible, free, and with zero injection surface.
-That is the entire live autofix surface for Phase A.
+The token is never put in argv or a URL: `curl` reads it from a config on
+stdin, and `git` gets it as an HTTP header through `GIT_CONFIG_*` (git ≥ 2.31;
+older git is refused rather than worked around). It should be least-privilege:
+PR comment + branch push, **no merge**.
 
 ## What is enforced mechanically
 
-Enforcement is in `lib.sh` (not prose to a model):
+`gate_e2e_quarantine_patch` in `lib.sh` — run in Phase D and again at publish:
 
-- **Path gate** (`gate_patch`): the patch is discarded if it touches tests,
-  lint/format/build config, CI, `.cursor/**`, or lockfiles, or renames files —
-  i.e. it cannot pass a check by weakening or deleting it.
-- **Quarantine gate** (`gate_e2e_quarantine_patch`): Phase D/E — single
-  expected `*.cy.ts`/`*.cy.js` path; signature/`@flaky` edits only.
-- **Clean-tree verification** (`verify_cmd`): CI applies the patch to a pristine
-  tree and re-runs the actual stage. Only a real green counts (Format/Lint).
-- **Scoped commit**: `open-bitbucket-pr.sh` and `push-e2e-quarantine.sh` stage
-  only the gated paths, never `git add -A`.
-- **Loop guard**: Format/Lint skips on `cursor/ci-autofix-*` or trailer
-  `Cursor-Autofix: true` only — not `e2e-flake` / subject `[cursor-autofix]` alone.
-
-## Recommended rollout
-
-Start in `plan` mode (comment only). Switch to `apply` once Format/Lint diffs
-and E2E quarantine comments look trustworthy on real PRs.
+- exactly one path, equal to the one the verdict named, ending `.cy.ts` /
+  `.cy.js`; no renames, copies, additions or deletions;
+- every changed line is an `it()` signature, a `tags:` line, or `@flaky`, and
+  none touches `cy.`, `should(`, `expect(`, `import`, `describe(`, hooks or
+  `it.skip`;
+- the patch must introduce `@flaky` and must not leave `it.only`.
 
 ## Configuration
 
-Environment (set by Jenkins):
-
-| Var                       | Meaning                                                    |
-| ------------------------- | ---------------------------------------------------------- |
-| `FAILED_STAGE`            | Check Format, Lint, or E2E Tests (publish routing)         |
-| `CHANGE_TARGET`           | Base branch for `nx affected`                              |
-| `CHANGE_BRANCH`           | PR source branch / PR destination for autofix (never main) |
-| `CHANGE_ID`               | PR id (for comments and branch naming)                     |
-| `AI_AUTOFIX_MODE`         | `plan` \| `apply` \| `off`                                 |
-| `AI_AUTOFIX_ARTIFACT_DIR` | Format/Lint patch dir — **must be outside the repo**       |
-| `BITBUCKET_AUTOFIX_TOKEN` | Publish only; scope to push + comment + create-PR          |
+| Var                       | Meaning                                                     |
+| ------------------------- | ----------------------------------------------------------- |
+| `ENABLE_AI_AUTOFIX`       | Jenkins parameter; enables Phase E                          |
+| `AI_AUTOFIX_MODE`         | `plan` \| `apply` \| `off`                                  |
+| `SKIP_E2E_ISOLATION`      | Phase C kill switch (writes a `skipped` verdict)            |
+| `SKIP_E2E_QUARANTINE`     | Phase D kill switch                                         |
+| `CHANGE_BRANCH`           | PR source branch; `apply` destination (never main/master)   |
+| `CHANGE_ID`               | PR id for comments                                          |
+| `BITBUCKET_AUTOFIX_TOKEN` | Phase E only                                                |
 | `BITBUCKET_WORKSPACE` / `BITBUCKET_REPO_SLUG` | Optional, set both or neither; otherwise derived from `origin`'s bitbucket.org URL. No default |
 
-The Bitbucket token should be least-privilege: branch push + PR create/comment,
-**no merge**. The E2E publish scripts never put it in argv or a URL: `curl`
-reads it from a config on stdin, and `git` gets it as an HTTP header through
-`GIT_CONFIG_*` (needs git ≥ 2.31; older git is refused, not worked around).
 PR comments need `jq` on the agent.
 
 ## Local checks
 
-`./validate-gates.sh` exercises the gates and helpers with no Bitbucket
-network access, including E2E parser fixtures under `testdata/e2e-fail-*.txt`,
-Phase C isolation dry-run / error-path checks and verdicts from canned
-Cypress output via a fake `npx` (no real Cypress), an end-to-end parse →
-isolate → tag → gate run with a hostile title that every emitted `.env` must
-round-trip byte-for-byte, Phase D
-quarantine tag shapes + content-gate rejects under `testdata/quarantine/`, and
-Phase E loop-guard / refuse-main checks for `push-e2e-quarantine.sh`.
+`./validate-gates.sh` runs with no Bitbucket network and no Cypress: parser
+fixtures under `testdata/e2e-fail-*.txt`; isolation verdicts from canned
+Cypress output via a fake `npx`; tagger shapes and gate rejects under
+`testdata/quarantine/`; the comment and push paths against a fake `curl` and a
+local bare remote, asserting the token never reaches argv; and an end-to-end
+parse → isolate → tag → gate run with a hostile title that every emitted
+`.env` must round-trip byte-for-byte.
 
 CI runs it in the `Validate Quarantine Gates` stage, inside the CI image. That
 image's `awk` is the only one the system depends on — the parser runs in the
