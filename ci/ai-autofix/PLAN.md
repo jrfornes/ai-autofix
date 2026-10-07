@@ -14,7 +14,7 @@ calendar time.
 | # | Work | Gate |
 | - | ---- | ---- |
 | 0 | `Jenkinsfile:167` null-safe; C-1; harness into CI | — |
-| 1 | Delete Format/Lint per the removal inventory | S0 first |
+| 1 | Delete Format/Lint per the removal inventory | S0 first — **done 2026-10-07** |
 | 2 | Spikes | D1 |
 | 3 | C-2…C-6, E-1, E-3…E-6, E-8, `%q` check, A11; then shadow-run + E1 | D2, D3 |
 | 4 | Gate budget + title check; quarantine budget; report-only un-quarantine | D4 |
@@ -29,7 +29,7 @@ precedes Stage 3 if S7 shows the parser unreliable.
 
 | ID | Question | Decides |
 | -- | -------- | ------- |
-| S0 | Is Format/Lint autofix used by anyone? | delete vs deprecate |
+| ~~S0~~ | ~~Is Format/Lint autofix used by anyone?~~ — answered 2026-10-07: no; deleted in Stage 1 | — |
 | S1 | How many `@flaky` today; does the tolerant stage pass? | Stage 4 thresholds; whether detection is the problem at all |
 | ~~S2~~ | ~~Agent's `awk`/`grep`~~ — moot since 2026-10-06: the parser runs in the CI image | — |
 | S3 | `nx-e2e-affected.sh`: browser, retries, serve, parallelism | C-2; whether retries make Phase C optional |
